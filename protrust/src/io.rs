@@ -97,7 +97,7 @@ impl FieldNumber {
         }
     }
 
-    /// Returns the value as a primitive type
+    /// Returns the value as a [`u32`](https://doc.rust-lang.org/nightly/std/primitive.u32.html)
     #[inline]
     pub const fn get(self) -> u32 {
         self.0.get()
@@ -154,18 +154,36 @@ impl Tag {
     }
 
     /// Gets the wire type from this tag
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::{Tag, WireType};
+    /// 
+    /// assert_eq!(Tag::new_from(8).unwrap().wire_type(), WireType::Varint);
+    /// assert_eq!(Tag::new_from(17).unwrap().wire_type(), WireType::Bit64);
+    /// ```
     #[inline]
     pub fn wire_type(self) -> WireType {
-        WireType::try_from((self.get() & 0b111) as u8).unwrap()
+        WireType::try_from((self.get() & 0b111) as u8).expect("invalid wire type")
     }
 
     /// Gets the field number from this tag
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::Tag;
+    /// 
+    /// assert_eq!(Tag::new_from(8).unwrap().number().get(), 1);
+    /// assert_eq!(Tag::new_from(17).unwrap().number().get(), 2);
+    /// ```
     #[inline]
     pub fn number(self) -> FieldNumber {
         unsafe { FieldNumber::new_unchecked(self.get() >> 3) }
     }
 
-    /// Returns the value as a primitive type
+    /// Returns the value as a [`u32`](https://doc.rust-lang.org/nightly/std/primitive.u32.html)
     #[inline]
     pub const fn get(self) -> u32 {
         self.0.get()
@@ -189,7 +207,7 @@ impl Display for Length {
 }
 
 impl Length {
-    /// Gets the underlying value as an `i32`
+    /// Returns the value as a [`i32`](https://doc.rust-lang.org/nightly/std/primitive.i32.html)
     #[inline]
     pub const fn get(self) -> i32 {
         self.0
@@ -328,11 +346,19 @@ impl Error for ReaderError {
 /// A result for a [`CodedReader`](struct.CodedReader.html) read operation
 pub type ReaderResult<T> = std::result::Result<T, ReaderError>;
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug)]
 /// A set of options that can be used to modify the behavior of [`CodedReader`](struct.CodedReader.html)
 pub struct ReaderOptions {
     /// Indicates if unknown field sets should skip reading fields
     pub skip_unknown_fields: bool,
+}
+
+impl Default for ReaderOptions {
+    fn default() -> Self {
+        ReaderOptions {
+            skip_unknown_fields: false
+        }
+    }
 }
 
 /// A coded input reader that reads from a borrowed [`BufRead`].
@@ -475,7 +501,9 @@ impl<'a> CodedReader<'a> {
     /// Reads a tag from the input, returning none if there is no more data available in the input.
     #[inline]
     pub fn read_tag(&mut self) -> ReaderResult<Option<Tag>> {
-        self.read_varint32().map(Tag::new_from)
+        let tag = self.read_varint32().map(Tag::new_from)?;
+        self.last_tag = tag;
+        Ok(tag)
     }
 
     /// Reads a 32-bit varint from the input. This is optimized for 32-bit varint values and will discard 
@@ -679,20 +707,22 @@ impl<'a> CodedWriter<'a> {
                 }
             },
             Right(ref mut buf) => {
-                // if this function is inlined, and value is constant, len is as well which means the loop will likely be unrolled
-                let len = raw::raw_varint32_size(value).get() as usize;
-                if buf.len() < len {
+                if raw::raw_varint32_size(value).get() as usize > buf.len() {
                     return Err(io::Error::from(io::ErrorKind::WriteZero).into());
                 }
-                unsafe {
-                    for i in 0..len {
+
+                let mut i = 0;
+                loop {
+                    unsafe {
                         *buf.get_unchecked_mut(i) = (value & 0x7F) as u8;
                         value >>= 7;
+                        i += 1;
+                        if value == 0 {
+                            *buf.get_unchecked_mut(i - 1) |= 0x80;
+                            return Ok(())
+                        }
                     }
-                    *buf.get_unchecked_mut(len - 1) |= 0x80;
-                    *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(len), buf.len() - len);
                 }
-                Ok(())
             }
         }
     }
@@ -708,30 +738,33 @@ impl<'a> CodedWriter<'a> {
                     unsafe {
                         *buf.get_unchecked_mut(i) = (value & 0x7F) as u8;
                         value >>= 7;
+                        i += 1;
                         if value == 0 {
-                            let part = buf.get_unchecked(0..=i);
+                            *buf.get_unchecked_mut(i - 1) |= 0x80;
+                            let part = buf.get_unchecked(0..i);
                             write.write_all(part)?;
                             return Ok(())
                         }
-                        *buf.get_unchecked_mut(i) |= 0x80;
-                        i += 1;
                     }
                 }
             },
-            Right(ref mut buf) => { 
-                let len = raw::raw_varint64_size(value).get() as usize;
-                if buf.len() < len {
+            Right(ref mut buf) => {
+                if raw::raw_varint64_size(value).get() as usize > buf.len() {
                     return Err(io::Error::from(io::ErrorKind::WriteZero).into());
                 }
-                unsafe {
-                    for i in 0..len {
+
+                let mut i = 0;
+                loop {
+                    unsafe {
                         *buf.get_unchecked_mut(i) = (value & 0x7F) as u8;
                         value >>= 7;
+                        i += 1;
+                        if value == 0 {
+                            *buf.get_unchecked_mut(i - 1) |= 0x80;
+                            return Ok(())
+                        }
                     }
-                    *buf.get_unchecked_mut(len - 1) |= 0x80;
-                    *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(len), buf.len() - len);
                 }
-                Ok(())
             }
         }
     }
@@ -814,7 +847,7 @@ impl<'a> CodedWriter<'a> {
 
     /// Writes a generic value with a tag to the output based on the provided field number.
     #[inline]
-    pub fn write_value_with_tag<T: raw::SizedValue + Wrapper>(&mut self, num: FieldNumber, value: &T::Inner) -> WriterResult {
+    pub fn write_value_with_number<T: raw::SizedValue + Wrapper>(&mut self, num: FieldNumber, value: &T::Inner) -> WriterResult {
         self.write_tag(Tag::new(num, T::WIRE_TYPE))?;
         self.write_value::<T>(value)?;
         if T::WIRE_TYPE == WireType::StartGroup {
@@ -876,6 +909,11 @@ mod test {
             }
 
             try_encode(0, &[0x80]);
+            try_encode(127, &[0xFF]);
+            try_encode(16_383, &[0x7F, 0xFF]);
+            try_encode(2_097_151, &[0x7F, 0x7F, 0xFF]);
+            try_encode(268_435_455, &[0x7F, 0x7F, 0x7F, 0xFF]);
+            try_encode(u32::max_value() as u64, &[0x7F, 0x7F, 0x7F, 0x7F, 0x8F]);
             try_encode(u64::max_value(), &[0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x81]);
         }
         #[test]
@@ -928,6 +966,7 @@ mod test {
             assert_eq!(output, [1]);
         }
 
+        // test that writing a value to less than the value's required space remaining returns an error
         macro_rules! fail_write_int {
             ($n:ident, $f:ident) => {
                 #[test]
@@ -969,6 +1008,12 @@ mod test {
                 let value = reader.read_varint32().unwrap();
 
                 assert_eq!(expected, value);
+
+                let mut bytes = bytes;
+                let mut reader = CodedReader::with_read(&mut bytes);
+                let value = reader.read_varint32().unwrap();
+
+                assert_eq!(expected, value);
             }
 
             try_decode(&[0x80], 0);
@@ -985,9 +1030,20 @@ mod test {
                 let value = reader.read_varint64().unwrap();
 
                 assert_eq!(expected, value);
+
+                let mut bytes = bytes;
+                let mut reader = CodedReader::with_read(&mut bytes);
+                let value = reader.read_varint64().unwrap();
+
+                assert_eq!(expected, value);
             }
 
             try_decode(&[0x80], 0);
+            try_decode(&[0xFF], 127);
+            try_decode(&[0x7F, 0xFF], 16_383);
+            try_decode(&[0x7F, 0x7F, 0xFF], 2_097_151);
+            try_decode(&[0x7F, 0x7F, 0x7F, 0xFF], 268_435_455);
+            try_decode(&[0x7F, 0x7F, 0x7F, 0x7F, 0x8F], u32::max_value() as u64);
             try_decode(&[0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x81], u64::max_value());
         }
     }
