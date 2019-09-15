@@ -1,3 +1,5 @@
+//! Defines the `UnknownFieldSet`, a struct used to contain unknown fields as they were read from coded readers.
+//! 
 //! As APIs are updated, certain fields may be removed or added from proto file definitions. If an old version of a message 
 //! encounters fields it doesn't recognize can still read them to be returned again via unknown fields.
 //! 

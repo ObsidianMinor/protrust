@@ -19,7 +19,7 @@ use trapper::Wrapper;
 /// a unique identifier for a field on the wire.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum WireType {
-    /// A value read a variable length integer.
+    /// A value read as a variable length integer.
     ///
     /// See the protobuf docs for more information on this encoding: https://developers.google.com/protocol-buffers/docs/encoding#varints
     Varint = 0,
@@ -88,6 +88,17 @@ impl FieldNumber {
     }
 
     /// Creates a field number if the given value is not zero or more than 536870911
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::FieldNumber;
+    /// 
+    /// assert_eq!(FieldNumber::new(0), None);
+    /// assert_eq!(FieldNumber::new(1).map(Into::into), Some(1));
+    /// assert_eq!(FieldNumber::new(FieldNumber::MAX_VALUE), Some(FieldNumber::MAX));
+    /// assert_eq!(FieldNumber::new(FieldNumber::MAX_VALUE + 1), None);
+    /// ```
     #[inline]
     pub fn new(n: u32) -> Option<FieldNumber> {
         if n != 0 && n <= Self::MAX_VALUE {
@@ -160,8 +171,8 @@ impl Tag {
     /// ```
     /// use protrust::io::{Tag, WireType};
     /// 
-    /// assert_eq!(Tag::new_from(8).unwrap().wire_type(), WireType::Varint);
-    /// assert_eq!(Tag::new_from(17).unwrap().wire_type(), WireType::Bit64);
+    /// assert_eq!(Tag::new_from(8).map(Tag::wire_type), Some(WireType::Varint));
+    /// assert_eq!(Tag::new_from(17).map(Tag::wire_type), Some(WireType::Bit64));
     /// ```
     #[inline]
     pub fn wire_type(self) -> WireType {
@@ -175,8 +186,8 @@ impl Tag {
     /// ```
     /// use protrust::io::Tag;
     /// 
-    /// assert_eq!(Tag::new_from(8).unwrap().number().get(), 1);
-    /// assert_eq!(Tag::new_from(17).unwrap().number().get(), 2);
+    /// assert_eq!(Tag::new_from(8).map(|t| t.number().get()), Some(1));
+    /// assert_eq!(Tag::new_from(17).map(|t| t.number().get()), Some(2));
     /// ```
     #[inline]
     pub fn number(self) -> FieldNumber {

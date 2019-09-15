@@ -1,4 +1,4 @@
-//! # protrust
+//! A fast, feature complete, protobuf implementation.
 
 #![feature(new_uninit)]
 #![feature(read_initializer)]
