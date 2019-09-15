@@ -143,27 +143,6 @@ impl Tag {
         Tag(NonZeroU32::new_unchecked(n))
     }
 
-    /// Creates a new tag if the value is not zero and has a valid field number and wire type
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use protrust::io::Tag;
-    ///
-    /// assert!(Tag::new_from(1).is_none());
-    /// assert!(Tag::new_from(8).is_some());
-    /// assert!(Tag::new_from(16).is_some());
-    /// assert!(Tag::new_from(14).is_none());
-    /// ```
-    #[inline]
-    pub fn new_from(n: u32) -> Option<Tag> {
-        match (n & 0b111, n >> 3) {
-            // (wire type, field number)
-            (6, _) | (7, _) | (_, 0) => None,
-            _ => unsafe { Some(Tag(NonZeroU32::new_unchecked(n))) },
-        }
-    }
-
     /// Creates a new tag value
     #[inline]
     pub const fn new(f: FieldNumber, wt: WireType) -> Tag {
@@ -176,9 +155,10 @@ impl Tag {
     /// 
     /// ```
     /// use protrust::io::{Tag, WireType};
+    /// # use std::convert::TryFrom;
     /// 
-    /// assert_eq!(Tag::new_from(8).map(Tag::wire_type), Some(WireType::Varint));
-    /// assert_eq!(Tag::new_from(17).map(Tag::wire_type), Some(WireType::Bit64));
+    /// assert_eq!(Tag::try_from(8).unwrap().wire_type(), WireType::Varint);
+    /// assert_eq!(Tag::try_from(17).unwrap().wire_type(), WireType::Bit64);
     /// ```
     #[inline]
     pub fn wire_type(self) -> WireType {
@@ -191,9 +171,10 @@ impl Tag {
     /// 
     /// ```
     /// use protrust::io::Tag;
+    /// # use std::convert::TryFrom;
     /// 
-    /// assert_eq!(Tag::new_from(8).map(|t| t.number().get()), Some(1));
-    /// assert_eq!(Tag::new_from(17).map(|t| t.number().get()), Some(2));
+    /// assert_eq!(Tag::try_from(8).unwrap().number().get(), 1);
+    /// assert_eq!(Tag::try_from(17).unwrap().number().get(), 2);
     /// ```
     #[inline]
     pub fn number(self) -> FieldNumber {
@@ -216,6 +197,44 @@ impl Display for Tag {
 impl From<Tag> for u32 {
     fn from(x: Tag) -> u32 {
         x.get()
+    }
+}
+
+/// The error returned when an attempt to convert a 32-bit value to a tag fails due to an invalid field number or wire type.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TryTagFromRawError(());
+
+impl Display for TryTagFromRawError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "invalid tag; this could be caused by an invalid wire type or a 0 field number")
+    }
+}
+
+impl Error for TryTagFromRawError { }
+
+impl TryFrom<u32> for Tag {
+    type Error = TryTagFromRawError;
+
+    /// Creates a new tag if the value is not zero and has a valid field number and wire type
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use protrust::io::Tag;
+    /// # use std::convert::TryFrom;
+    ///
+    /// assert!(Tag::try_from(1).is_err());
+    /// assert!(Tag::try_from(8).is_ok());
+    /// assert!(Tag::try_from(16).is_ok());
+    /// assert!(Tag::try_from(14).is_err());
+    /// ```
+    #[inline]
+    fn try_from(n: u32) -> Result<Tag, TryTagFromRawError> {
+        match (n & 0b111, n >> 3) {
+            // (wire type, field number)
+            (6, _) | (7, _) | (_, 0) => Err(TryTagFromRawError(())),
+            _ => unsafe { Ok(Tag(NonZeroU32::new_unchecked(n))) },
+        }
     }
 }
 
@@ -530,9 +549,41 @@ impl<'a> CodedReader<'a> {
     /// Reads a tag from the input, returning none if there is no more data available in the input.
     #[inline]
     pub fn read_tag(&mut self) -> ReaderResult<Option<Tag>> {
-        let tag = self.read_varint32().map(Tag::new_from)?;
-        self.last_tag = tag;
-        Ok(tag)
+        let mut buf = [0u8; 1];
+        let amnt = self.inner.read(&mut buf)?;
+        if amnt == 0 {
+            self.last_tag = None;
+            return Ok(None);
+        }
+        unsafe {
+            let b = *buf.get_unchecked(0);
+            let mut value = (b & 0x7F) as u32;
+            if b >= 0x80 {
+                let tag = Tag::try_from(value).map_err(|_| ReaderError::InvalidTag(value))?;
+                self.last_tag = Some(tag);
+                return Ok(Some(tag));
+            }
+            for i in 1..5 {
+                self.read_exact(&mut buf)?;
+                let b = *buf.get_unchecked(0) as u32;
+                value |= (b & 0x7F) << (7 * i);
+                if b >= 0x80 {
+                    let tag = Tag::try_from(value).map_err(|_| ReaderError::InvalidTag(value))?;
+                    self.last_tag = Some(tag);
+                    return Ok(Some(tag));
+                }
+            }
+            for _ in 0..5 {
+                self.read_exact(&mut buf)?;
+                let b = *buf.get_unchecked(0) as u32;
+                if b >= 0x80 {
+                    let tag = Tag::try_from(value).map_err(|_| ReaderError::InvalidTag(value))?;
+                    self.last_tag = Some(tag);
+                    return Ok(Some(tag));
+                }
+            }
+        }
+        Err(ReaderError::MalformedVarint)
     }
 
     /// Reads a 32-bit varint from the input. This is optimized for 32-bit varint values and will discard 
@@ -748,6 +799,7 @@ impl<'a> CodedWriter<'a> {
                         i += 1;
                         if value == 0 {
                             *buf.get_unchecked_mut(i - 1) |= 0x80;
+                            *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(i), buf.len() - i);
                             return Ok(())
                         }
                     }
@@ -790,6 +842,7 @@ impl<'a> CodedWriter<'a> {
                         i += 1;
                         if value == 0 {
                             *buf.get_unchecked_mut(i - 1) |= 0x80;
+                            *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(i), buf.len() - i);
                             return Ok(())
                         }
                     }
@@ -900,8 +953,12 @@ impl<'a> CodedWriter<'a> {
 
 #[cfg(test)]
 mod test {
+    use assert_matches::assert_matches;
+    use crate::io::{CodedWriter, WriterResult, CodedReader, Tag, FieldNumber, WireType};
+
     mod coded_writer {
-        use crate::io::{CodedWriter, Length};
+        use assert_matches::assert_matches;
+        use crate::io::{CodedWriter, WriterError, Length};
         use crate::raw::{Uint32, Uint64};
 
         #[test]
@@ -1003,10 +1060,10 @@ mod test {
                     let mut empty = [].as_mut();
 
                     let mut writer = CodedWriter::with_slice(empty);
-                    assert_eq!(writer.$f(10).ok(), None);
+                    assert_matches!(writer.$f(10), Err(WriterError::IoError(ref err)) if err.kind() == std::io::ErrorKind::WriteZero);
 
                     let mut writer = CodedWriter::with_write(&mut empty);
-                    assert_eq!(writer.$f(10).ok(), None);
+                    assert_matches!(writer.$f(10), Err(WriterError::IoError(ref err)) if err.kind() == std::io::ErrorKind::WriteZero);
                 }
             };
         }
@@ -1021,14 +1078,15 @@ mod test {
             let mut empty = [].as_mut();
 
             let mut writer = CodedWriter::with_slice(empty);
-            assert_eq!(writer.write_bytes(&[1]).ok(), None);
+            assert_matches!(writer.write_bytes(&[1]), Err(WriterError::IoError(ref err)) if err.kind() == std::io::ErrorKind::WriteZero);
 
             let mut writer = CodedWriter::with_write(&mut empty);
-            assert_eq!(writer.write_bytes(&[1]).ok(), None);
+            assert_matches!(writer.write_bytes(&[1]), Err(WriterError::IoError(ref err)) if err.kind() == std::io::ErrorKind::WriteZero);
         }
     }
     mod coded_reader {
-        use crate::io::CodedReader;
+        use assert_matches::assert_matches;
+        use crate::io::{Tag, FieldNumber, WireType, CodedReader, ReaderError};
 
         #[test]
         fn varint32_decode() {
@@ -1051,6 +1109,7 @@ mod test {
             try_decode(&[0x7F, 0x7F, 0xFF], 2_097_151);
             try_decode(&[0x7F, 0x7F, 0x7F, 0xFF], 268_435_455);
             try_decode(&[0x7F, 0x7F, 0x7F, 0x7F, 0x8F], u32::max_value());
+            try_decode(&[0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x81], u32::max_value()); // test that we discard the top 32 bits
         }
         #[test]
         fn varint64_decode() {
@@ -1075,5 +1134,188 @@ mod test {
             try_decode(&[0x7F, 0x7F, 0x7F, 0x7F, 0x8F], u32::max_value() as u64);
             try_decode(&[0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x81], u64::max_value());
         }
+        #[test]
+        fn malformed_varint() {
+            let data = [0u8; 11];
+            let mut reader = CodedReader::with_slice(&data);
+
+            assert_matches!(reader.read_varint32(), Err(ReaderError::MalformedVarint));
+
+            let mut read = data.as_ref();
+            let mut reader = CodedReader::with_read(&mut read);
+
+            assert_matches!(reader.read_varint32(), Err(ReaderError::MalformedVarint));
+
+            let mut reader = CodedReader::with_slice(&data);
+
+            assert_matches!(reader.read_varint64(), Err(ReaderError::MalformedVarint));
+
+            let mut read = data.as_ref();
+            let mut reader = CodedReader::with_read(&mut read);
+
+            assert_matches!(reader.read_varint64(), Err(ReaderError::MalformedVarint));
+        }
+        #[test]
+        fn tag_decode() {
+            // decoding a tag should read it and set the last tag
+            let expected_tag = Tag::new(FieldNumber::new(1).unwrap(), WireType::Varint);
+            let data = [136];
+            let mut reader = CodedReader::with_slice(&data);
+
+            assert_matches!(reader.read_tag(), Ok(Some(tag)) if tag == expected_tag);
+            assert_eq!(reader.last_tag(), Some(expected_tag));
+
+            let mut bytes = data.as_ref();
+            let mut reader = CodedReader::with_read(&mut bytes);
+
+            assert_matches!(reader.read_tag(), Ok(Some(tag)) if tag == expected_tag);
+            assert_eq!(reader.last_tag(), Some(expected_tag));
+        }
+        #[test]
+        fn fail_tag_decode() {
+            // decoding an invalid tag should return the InvalidTag error
+            let data = [128]; // a zero tag
+            let mut reader = CodedReader::with_slice(&data);
+
+            assert_matches!(reader.read_tag(), Err(ReaderError::InvalidTag(0)));
+            assert_eq!(reader.last_tag(), None);
+
+            let mut bytes = data.as_ref();
+            let mut reader = CodedReader::with_read(&mut bytes);
+
+            assert_matches!(reader.read_tag(), Err(ReaderError::InvalidTag(0)));
+            assert_eq!(reader.last_tag(), None);
+        }
+        #[test]
+        fn none_tag_marks_eof() {
+            let data = [];
+            let mut reader = CodedReader::with_slice(&data);
+
+            assert_matches!(reader.read_tag(), Ok(None));
+            assert_eq!(reader.last_tag(), None);
+
+            let mut bytes = data.as_ref();
+            let mut reader = CodedReader::with_read(&mut bytes);
+
+            assert_matches!(reader.read_tag(), Ok(None));
+            assert_eq!(reader.last_tag(), None);
+        }
+        #[test]
+        fn push_pop_length_stack() {
+            fn check(reader: &mut CodedReader) {
+                let len = reader.read_length().unwrap();
+                assert_eq!(len.get(), 0);
+
+                let old = reader.push_length(len);
+                assert!(reader.reached_limit());
+
+                reader.pop_length(old);
+            }
+
+            let data = [128u8];
+            check(&mut CodedReader::with_slice(&data));
+
+            let mut read = data.as_ref();
+            check(&mut CodedReader::with_read(&mut read));
+        }
+        #[test]
+        fn nested_lengths() {
+            fn check(reader: &mut CodedReader) {
+                let len = reader.read_length().unwrap();
+                assert_eq!(len.get(), 1);
+
+                let old = reader.push_length(len);
+                assert!(!reader.reached_limit());
+
+                let nested_len = reader.read_length().unwrap();
+                assert_eq!(nested_len.get(), 0);
+
+                let nested_old = reader.push_length(nested_len);
+                assert!(reader.reached_limit());
+
+                reader.pop_length(nested_old);
+
+                assert!(reader.reached_limit());
+
+                reader.pop_length(old);
+            }
+
+            let data = [129u8, 128];
+            check(&mut CodedReader::with_slice(&data));
+
+            let mut read = data.as_ref();
+            check(&mut CodedReader::with_read(&mut read));
+        }
+        #[test]
+        fn decode_bit32() {
+            let bytes = [123, 0, 0, 0];
+            let mut reader = CodedReader::with_slice(&bytes);
+
+            assert_eq!(reader.read_bit32().unwrap(), 123);
+
+            let mut read = bytes.as_ref();
+            let mut reader = CodedReader::with_read(&mut read);
+
+            assert_eq!(reader.read_bit32().unwrap(), 123);
+        }
+        #[test]
+        fn decode_bit64() {
+            let bytes = [123, 0, 0, 0, 0, 0, 0, 0];
+            let mut reader = CodedReader::with_slice(&bytes);
+
+            assert_eq!(reader.read_bit64().unwrap(), 123);
+
+            let mut read = bytes.as_ref();
+            let mut reader = CodedReader::with_read(&mut read);
+
+            assert_eq!(reader.read_bit64().unwrap(), 123);
+        }
+    }
+
+    #[test]
+    fn roundtrip_many_values() {
+        fn write(output: &mut CodedWriter) -> WriterResult {
+            output.write_tag(Tag::new(FieldNumber::new(1).unwrap(), WireType::Varint))?;
+            output.write_varint32(1)?;
+            output.write_tag(Tag::new(FieldNumber::new(2).unwrap(), WireType::Varint))?;
+            output.write_varint64(u64::max_value())?;
+            output.write_tag(Tag::new(FieldNumber::new(3).unwrap(), WireType::Bit32))?;
+            output.write_bit32(123)?;
+            output.write_tag(Tag::new(FieldNumber::new(4).unwrap(), WireType::Bit64))?;
+            output.write_bit64(1234567890)?;
+            output.write_tag(Tag::new(FieldNumber::new(5).unwrap(), WireType::LengthDelimited))?;
+            output.write_length_delimited(&[12])?;
+            Ok(())
+        }
+        fn read(input: &mut CodedReader) {
+            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(1).unwrap(), WireType::Varint)));
+            assert_matches!(input.read_varint32(), Ok(1));
+            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(2).unwrap(), WireType::Varint)));
+            assert_matches!(input.read_varint64(), Ok(std::u64::MAX));
+            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(3).unwrap(), WireType::Bit32)));
+            assert_matches!(input.read_bit32(), Ok(123));
+            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(4).unwrap(), WireType::Bit64)));
+            assert_matches!(input.read_bit64(), Ok(1234567890));
+            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(5).unwrap(), WireType::LengthDelimited)));
+            assert_matches!(input.read_length_delimited(), Ok(ref value) if value.as_ref().eq(&[12]));
+        }
+
+        // (5 * 1 byte) tags + 1 1 byte varint + 1 10 byte varint + 1 32-bit fixed + 1 64-bit fixed + 1 1 byte length delimited (2 bytes)
+
+        let mut data = [0u8; 30];
+        let mut writer = CodedWriter::with_slice(&mut data);
+        write(&mut writer).unwrap();
+
+        let mut input = CodedReader::with_slice(&data);
+        read(&mut input);
+
+        let mut data = [0u8; 30];
+        let mut bytes = data.as_mut();
+        let mut writer = CodedWriter::with_write(&mut bytes);
+        write(&mut writer).unwrap();
+
+        let mut bytes = data.as_ref();
+        let mut input = CodedReader::with_read(&mut bytes);
+        read(&mut input);
     }
 }
