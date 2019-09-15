@@ -121,6 +121,12 @@ impl Display for FieldNumber {
     }
 }
 
+impl From<FieldNumber> for u32 {
+    fn from(x: FieldNumber) -> u32 {
+        x.get()
+    }
+}
+
 /// A tag containing a wire type and field number. Its value is known to not be 0, and both field number and wire type are valid values
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -207,6 +213,12 @@ impl Display for Tag {
     }
 }
 
+impl From<Tag> for u32 {
+    fn from(x: Tag) -> u32 {
+        x.get()
+    }
+}
+
 /// An opaque type that represents the length of a delimited value
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Length(pub(crate) i32);
@@ -240,6 +252,12 @@ impl Length {
     #[inline]
     pub fn for_fields(value: &impl crate::FieldSet) -> Option<Length> {
         value.calculate_size(LengthBuilder::new()).map(LengthBuilder::build)
+    }
+}
+
+impl From<Length> for i32 {
+    fn from(x: Length) -> i32 {
+        x.get()
     }
 }
 
