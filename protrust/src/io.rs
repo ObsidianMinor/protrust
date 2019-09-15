@@ -221,8 +221,8 @@ impl Length {
 
     /// Calculates the length of a collection of values
     #[inline]
-    pub fn for_values<T>(value: &impl collections::RepeatedValue<T>, codec: raw::TaggedValue<T>) -> Option<Length> {
-        value.calculate_size(LengthBuilder::new(), codec).map(LengthBuilder::build)
+    pub fn for_values<T>(value: &impl collections::RepeatedValue<T>, tag: Tag) -> Option<Length> {
+        value.calculate_size(LengthBuilder::new(), tag).map(LengthBuilder::build)
     }
 
     /// Calculates the length of a set of fields
@@ -277,8 +277,8 @@ impl LengthBuilder {
 
     /// Adds a repeated value's size to the length
     #[inline]
-    pub fn add_values<V>(self, value: &impl collections::RepeatedValue<V>, codec: raw::TaggedValue<V>) -> Option<Self> {
-        value.calculate_size(self, codec)
+    pub fn add_values<V>(self, value: &impl collections::RepeatedValue<V>, tag: Tag) -> Option<Self> {
+        value.calculate_size(self, tag)
     }
 
     /// Adds a set of fields to the length
@@ -858,8 +858,8 @@ impl<'a> CodedWriter<'a> {
 
     /// Writes a collection of values to the output.
     #[inline]
-    pub fn write_values<T>(&mut self, value: &impl collections::RepeatedValue<T>, codec: raw::TaggedValue<T>) -> WriterResult {
-        value.write_to(self, codec)
+    pub fn write_values<T>(&mut self, value: &impl collections::RepeatedValue<T>, tag: Tag) -> WriterResult {
+        value.write_to(self, tag)
     }
 
     /// Writes a collection of fields to the output.

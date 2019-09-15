@@ -2,10 +2,9 @@
 //! Each value with specific serialization or deserialization, a specific 
 
 use crate::internal::Sealed;
-use crate::io::{self, Tag, WireType, Length, LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult};
+use crate::io::{self, WireType, Length, LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult};
 use std::borrow::Borrow;
 use std::convert::TryInto;
-use std::marker::PhantomData;
 use trapper::newtype;
 
 /// A value capable of merging itself with an input value, writing itself to an output, calculating it's size, and checking it's initialization.
@@ -552,31 +551,6 @@ impl<T: crate::LiteMessage> SizedValue for Group<T> {
         T::new_from(input).map(Self)
     }
 }
-
-/// A value type associated with a tag
-pub struct TaggedValue<T> {
-    t: PhantomData<fn(T)>,
-    tag: Tag
-}
-
-impl<T> TaggedValue<T> {
-    /// Creates a new tagged value using the specified tag
-    pub const fn new(tag: Tag) -> Self {
-        Self { t: PhantomData, tag }
-    }
-    /// Gets the associated tag from this instance
-    pub const fn tag(&self) -> Tag {
-        self.tag
-    }
-}
-
-impl<T> Clone for TaggedValue<T> {
-    fn clone(&self) -> Self {
-        Self { t: PhantomData, tag: self.tag }
-    }
-}
-
-impl<T> Copy for TaggedValue<T> { }
 
 #[inline]
 pub(crate) const fn raw_varint32_size(value: u32) -> Length {
