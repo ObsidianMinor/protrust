@@ -60,6 +60,13 @@ pub trait LiteMessage: CodableMessage + Clone + Default + Debug {
 /// allowing code to refer to them easily.
 pub trait Enum: From<i32> + Into<i32> + Clone + Copy + Debug + Hash { }
 
+/// A type that can be merged with one of `T`.
+/// Merge behavior is specific to each type.
+pub trait Mergable<T = Self>: Sized {
+    /// Merges another value into this one
+    fn merge(&mut self, other: &T);
+}
+
 /// The result of trying to add a field to a field set
 pub enum FieldReadState<'a, 'b> {
     /// The set didn't read the field. Sets should return the
