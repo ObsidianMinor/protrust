@@ -5,9 +5,6 @@ authors = ["Sydney Acksman <obsidianminor@gmail.com>"]
 edition = "2018"
 
 [features]
-default = ["std"]
-# uses std types when possible
-std = []
 # use checked addition when calculating value sizes
 checked_size = []
 
