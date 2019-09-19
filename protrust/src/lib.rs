@@ -4,6 +4,9 @@
 #![feature(read_initializer)]
 #![feature(const_fn)]
 #![feature(specialization)]
+#![feature(allocator_api)]
+#![feature(alloc_layout_extra)]
+#![feature(box_into_raw_non_null)]
 
 #![warn(missing_docs)]
 
@@ -16,6 +19,7 @@ pub mod raw;
 pub mod unknown_fields;
 
 use crate::io::{LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult};
+use std::alloc::Alloc;
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -33,23 +37,42 @@ pub trait CodableMessage {
     fn is_initialized(&self) -> bool;
 }
 
-/// A LITE message. 
-pub trait LiteMessage: CodableMessage + Clone + Default + Debug {
-    /// Gets a shared reference to the unknown fields in this message
-    fn unknown_fields(&self) -> &UnknownFieldSet;
-    /// Gets a unique reference to the unknown fields in this message
-    fn unknown_fields_mut(&mut self) -> &mut UnknownFieldSet;
-
-    /// Merges another instance of this message into this one
-    fn merge(&mut self, other: &Self);
-
-    /// Creates a new instance of the message
-    fn new() -> Self {
-        Self::default()
+impl<T: ?Sized + CodableMessage> CodableMessage for Box<T> {
+    #[inline]
+    fn merge_from(&mut self, input: &mut CodedReader) -> ReaderResult<()> {
+        self.as_mut().merge_from(input)
     }
+    #[inline]
+    fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
+        self.as_ref().calculate_size(builder)
+    }
+    #[inline]
+    fn write_to(&self, output: &mut CodedWriter) -> WriterResult {
+        self.as_ref().write_to(output)
+    }
+    #[inline]
+    fn is_initialized(&self) -> bool {
+        self.as_ref().is_initialized()
+    }
+}
+
+/// An allocator aware LITE message.
+pub trait LiteMessage: CodableMessage + Sized {
+    /// The allocator this message is located in
+    type Alloc: Alloc;
+
+    /// Gets a shared reference to the unknown fields in this message
+    fn unknown_fields(&self) -> &UnknownFieldSet<Self::Alloc>;
+    /// Gets a unique reference to the unknown fields in this message
+    fn unknown_fields_mut(&mut self) -> &mut UnknownFieldSet<Self::Alloc>;
+
+    /// Creates a new instance of the message where the fields 
+    /// of the message are allocated in the specified allocator
+    fn new(a: Self::Alloc) -> Self;
+
     /// Reads a new instance of the message from a [`CodedReader`](io/struct.CodedReader.html)
-    fn new_from(input: &mut CodedReader) -> ReaderResult<Self> {
-        let mut instance = Self::new();
+    fn new_from(input: &mut CodedReader, a: Self::Alloc) -> ReaderResult<Self> {
+        let mut instance = Self::new(a);
         instance.merge_from(input)?;
         Ok(instance)
     }
@@ -61,10 +84,17 @@ pub trait LiteMessage: CodableMessage + Clone + Default + Debug {
 pub trait Enum: From<i32> + Into<i32> + Clone + Copy + Debug + Hash { }
 
 /// A type that can be merged with one of `T`.
-/// Merge behavior is specific to each type.
+/// Merge behavior is specific to each type, the default behavior for clonable types clones from the other value.
 pub trait Mergable<T = Self>: Sized {
     /// Merges another value into this one
     fn merge(&mut self, other: &T);
+}
+
+default impl<T: Clone> Mergable for T {
+    #[inline]
+    fn merge(&mut self, other: &T) {
+        self.clone_from(other)
+    }
 }
 
 /// The result of trying to add a field to a field set
@@ -105,6 +135,4 @@ pub trait FieldSet: internal::Sealed {
     fn write_to(&self, output: &mut CodedWriter) -> WriterResult;
     /// Returns if all the fields in this set are initialized
     fn is_initialized(&self) -> bool;
-    /// Merges another set of fields into this one
-    fn merge(&mut self, other: &Self);
 }

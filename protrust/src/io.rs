@@ -2,13 +2,14 @@
 
 use crate::{collections, raw};
 use either::{Either, Left, Right};
+use std::alloc::{self, Layout, Alloc, Global};
 use std::convert::{TryInto, TryFrom};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read, BufReader, Write};
 use std::mem;
 use std::num::NonZeroU32;
-use std::ptr;
+use std::ptr::{self, NonNull};
 use std::slice;
 use std::string::FromUtf8Error;
 use trapper::Wrapper;
@@ -342,6 +343,71 @@ impl LengthBuilder {
     }
 }
 
+/// A string of bytes that can be allocated into a provided allocator.
+/// This is used by [`CodedReader`](struct.CodedReader.html) to read length delimited byte values
+/// into various kinds of byte collections.
+pub trait ByteString: AsRef<[u8]> + AsMut<[u8]> {
+    /// The allocator to allocate the byte string into
+    type Alloc: Alloc;
+
+    /// Creates a new instance of the byte string with the specified allocator. This value must be zeroed.
+    fn new(len: usize, a: Self::Alloc) -> Self;
+
+    /// Resizes the byte string, reusing an existing allocator. This value must be zeroed.
+    fn resize(&mut self, new_len: usize);
+}
+
+impl ByteString for Box<[u8]> {
+    type Alloc = Global;
+
+    fn new(len: usize, mut a: Global) -> Self {
+        unsafe {
+            let layout = Layout::array::<u8>(len).unwrap();
+            let value = a.alloc_zeroed(layout).unwrap_or_else(|_| alloc::handle_alloc_error(layout));
+            let slice = slice::from_raw_parts_mut(value.as_ptr(), len);
+            Box::from_raw(slice)
+        }
+    }
+    fn resize(&mut self, new_len: usize) {
+        let mut a = Global;
+        match (self.len(), new_len) {
+            (0, 0) => { /* do nothing, since there's nothing here */ },
+            (0, new_len) => { // we don't need to deallocate and instead we can just allocate and write
+                *self = ByteString::new(new_len, a);
+            },
+            (len, 0) => unsafe { // we just need to deallocate and write an empty slice
+                let layout = Layout::array::<u8>(len).unwrap();
+                let b = ptr::read(self);
+                let ptr = Box::into_raw_non_null(b).cast::<u8>();
+                a.dealloc(ptr, layout);
+                ptr::write(self, Box::from_raw(slice::from_raw_parts_mut(NonNull::dangling().as_ptr(), 0)));
+            },
+            (old_len, new_len) => unsafe { // try to reallocate in-place
+                let b = ptr::read(self);
+                let ptr = Box::into_raw_non_null(b).cast::<u8>();
+                let new_ptr = a.realloc_array(ptr, old_len, new_len).unwrap_or_else(|_| alloc::handle_alloc_error(Layout::array::<u8>(new_len).unwrap()));
+                ptr::write_bytes(new_ptr.as_ptr(), 0, new_len);
+                ptr::write(self, Box::from_raw(slice::from_raw_parts_mut(new_ptr.as_ptr(), new_len)));
+            }
+        }
+    }
+}
+
+impl ByteString for Vec<u8> {
+    type Alloc = Global;
+
+    fn new(len: usize, _: Global) -> Self {
+        vec![0u8; len]
+    }
+    fn resize(&mut self, new_len: usize) {
+        let old_len = self.len();
+        self.resize(new_len, 0);
+        if old_len <= new_len {
+            unsafe { ptr::write_bytes(self[0..old_len].as_mut_ptr(), 0, old_len) };
+        }
+    }
+}
+
 /// The error type for [`CodedReader`](struct.CodedReader.html)
 #[derive(Debug)]
 pub enum ReaderError {
@@ -644,17 +710,23 @@ impl<'a> CodedReader<'a> {
 
     /// Reads a length delimited value from the input prefixed by a length
     #[inline]
-    pub fn read_length_delimited(&mut self) -> ReaderResult<Box<[u8]>> {
-        let length = self.read_length()?;
-        let mut data;
-        unsafe {
-            data = Box::new_uninit_slice(length.get() as usize).assume_init();
-            if let Left(ref r) = self.inner {
-                r.initializer().initialize(data.as_mut());
-            }
-        }
-        self.read_exact(data.as_mut())?;
-        Ok(data)
+    pub fn read_length_delimited<T: ByteString>(&mut self, a: T::Alloc) -> ReaderResult<T> {
+        let length = self.read_length()?.get();
+        let mut value = T::new(length as usize, a);
+        debug_assert!(value.as_ref().len() == length as usize);
+
+        self.read_exact(value.as_mut())?;
+        Ok(value)
+    }
+
+    /// Merges a length delimited value from the input prefixed by the length. This may reallocate
+    pub fn merge_length_delimited<T: ByteString>(&mut self, value: &mut T) -> ReaderResult<()> {
+        let length = self.read_length()?.get();
+        value.resize(length as usize);
+        debug_assert!(value.as_ref().len() == length as usize);
+
+        self.read_exact(value.as_mut())?;
+        Ok(())
     }
 
     #[inline]
@@ -664,7 +736,7 @@ impl<'a> CodedReader<'a> {
             match tag.wire_type() {
                 WireType::Varint => { self.read_varint64()?; },
                 WireType::Bit64 => { self.read_bit64()?; },
-                WireType::LengthDelimited => { self.read_length_delimited()?; },
+                WireType::LengthDelimited => { self.read_length_delimited::<Box<_>>(Global)?; },
                 WireType::StartGroup => {
                     let end_tag = Tag::new(tag.number(), WireType::EndGroup);
                     while let Some(tag) = self.read_tag()? {
@@ -682,10 +754,16 @@ impl<'a> CodedReader<'a> {
         Ok(())
     }
 
-    /// Reads a new instance of the value from the input
+    /// Reads an instance of the specified value
     #[inline]
-    pub fn read_value<T: raw::SizedValue + Wrapper>(&mut self) -> ReaderResult<T::Inner> {
+    pub fn read_value<T: raw::Primitive + Wrapper>(&mut self) -> ReaderResult<T::Inner> {
         T::read_new(self).map(T::unwrap)
+    }
+
+    /// Reads a heaping values in the specified allocator instance
+    #[inline]
+    pub fn read_value_in<T: raw::Heaping + Wrapper>(&mut self, a: T::Alloc) -> ReaderResult<T::Inner> {
+        T::read_new(self, a).map(T::unwrap)
     }
 
     /// Merges an existing instance of a value with a value from the input
@@ -696,8 +774,14 @@ impl<'a> CodedReader<'a> {
 
     /// Adds values from the input to the repeated value
     #[inline]
-    pub fn add_values_to<T>(&mut self, value: &mut impl collections::RepeatedValue<T>) -> ReaderResult<()> {
+    pub fn add_values_to<T: raw::Primitive>(&mut self, value: &mut impl collections::RepeatedPrimitiveValue<T>) -> ReaderResult<()> {
         value.add_entries_from(self)
+    }
+
+    /// Adds values from the input to the 
+    #[inline]
+    pub fn add_values_to_in<T: raw::Heaping>(&mut self, value: &mut impl collections::RepeatedHeapingValue<T>, a: T::Alloc) -> ReaderResult<()> {
+        value.add_entries_from(self, a)
     }
 
     /// Tries to add the field to the set, possibly adding the field or yielding control to another set
@@ -927,17 +1011,6 @@ impl<'a> CodedWriter<'a> {
         T::wrap_ref(value).write_to(self)
     }
 
-    /// Writes a generic value with a tag to the output based on the provided field number.
-    #[inline]
-    pub fn write_value_with_number<T: raw::SizedValue + Wrapper>(&mut self, num: FieldNumber, value: &T::Inner) -> WriterResult {
-        self.write_tag(Tag::new(num, T::WIRE_TYPE))?;
-        self.write_value::<T>(value)?;
-        if T::WIRE_TYPE == WireType::StartGroup {
-            self.write_tag(Tag::new(num, WireType::EndGroup))?;
-        }
-        Ok(())
-    }
-
     /// Writes a collection of values to the output.
     #[inline]
     pub fn write_values<T>(&mut self, value: &impl collections::RepeatedValue<T>, tag: Tag) -> WriterResult {
@@ -955,6 +1028,7 @@ impl<'a> CodedWriter<'a> {
 mod test {
     use assert_matches::assert_matches;
     use crate::io::{CodedWriter, WriterResult, CodedReader, Tag, FieldNumber, WireType};
+    use std::alloc::Global;
 
     mod coded_writer {
         use assert_matches::assert_matches;
@@ -1297,7 +1371,7 @@ mod test {
             assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(4).unwrap(), WireType::Bit64)));
             assert_matches!(input.read_bit64(), Ok(1234567890));
             assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(5).unwrap(), WireType::LengthDelimited)));
-            assert_matches!(input.read_length_delimited(), Ok(ref value) if value.as_ref().eq(&[12]));
+            assert_matches!(input.read_length_delimited::<Box<_>>(Global), Ok(ref value) if value.as_ref().eq(&[12]));
         }
 
         // (5 * 1 byte) tags + 1 1 byte varint + 1 10 byte varint + 1 32-bit fixed + 1 64-bit fixed + 1 1 byte length delimited (2 bytes)
