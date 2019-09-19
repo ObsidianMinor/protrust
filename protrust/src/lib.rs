@@ -2,7 +2,6 @@
 
 #![feature(new_uninit)]
 #![feature(read_initializer)]
-#![feature(const_fn)]
 #![feature(specialization)]
 #![feature(allocator_api)]
 #![feature(alloc_layout_extra)]
