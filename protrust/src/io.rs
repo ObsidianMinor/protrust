@@ -290,13 +290,13 @@ pub struct LengthBuilder(pub(crate) i32);
 impl LengthBuilder {
     /// Creates a new length builder
     #[inline]
-    pub const fn new() -> LengthBuilder {
+    pub fn new() -> LengthBuilder {
         Self(0)
     }
 
     /// Adds an arbitrary number of bytes to the length
     #[inline]
-    pub const fn add_bytes(self, value: i32) -> Option<Self> {
+    pub fn add_bytes(self, value: i32) -> Option<Self> {
         #[cfg(feature = "checked_size")]
         return self.0.checked_add(value).map(LengthBuilder);
 
@@ -306,7 +306,7 @@ impl LengthBuilder {
 
     /// Adds a tag to the output
     #[inline]
-    pub const fn add_tag(self, tag: Tag) -> Option<Self> {
+    pub fn add_tag(self, tag: Tag) -> Option<Self> {
         self.add_bytes(raw::raw_varint32_size(tag.get()).get())
     }
 
@@ -339,7 +339,7 @@ impl LengthBuilder {
 
     /// Consumes the builder, returning a [`Length`](struct.Length.html) for writing to an output
     #[inline]
-    pub const fn build(self) -> Length {
+    pub fn build(self) -> Length {
         Length(self.0)
     }
 }
