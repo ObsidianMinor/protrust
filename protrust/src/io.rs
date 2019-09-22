@@ -382,12 +382,26 @@ impl ByteString for Box<[u8]> {
                 a.dealloc(ptr, layout);
                 ptr::write(self, Box::from_raw(slice::from_raw_parts_mut(NonNull::dangling().as_ptr(), 0)));
             },
-            (old_len, new_len) => unsafe { // try to reallocate in-place
-                let b = ptr::read(self);
-                let ptr = Box::into_raw_non_null(b).cast::<u8>();
-                let new_ptr = a.realloc_array(ptr, old_len, new_len).unwrap_or_else(|_| alloc::handle_alloc_error(Layout::array::<u8>(new_len).unwrap()));
-                ptr::write_bytes(new_ptr.as_ptr(), 0, new_len);
-                ptr::write(self, Box::from_raw(slice::from_raw_parts_mut(new_ptr.as_ptr(), new_len)));
+            (old_len, new_len) => unsafe {
+                if old_len == new_len {
+                    ptr::write_bytes(self.as_mut_ptr(), 0, new_len);
+                } else {
+                    let layout = Layout::array::<u8>(old_len).unwrap();
+                    let b = ptr::read(self);
+                    let ptr = Box::into_raw_non_null(b).cast::<u8>();
+                    let result = 
+                        if old_len > new_len {
+                            a.shrink_in_place(ptr, layout, new_len)
+                        } else {
+                            a.grow_in_place(ptr, layout, new_len)
+                        };
+                    if let Ok(()) = result {
+                        ptr::write_bytes(ptr.as_ptr(), 0, new_len); // no guarantee that the newly available memory is zeroed
+                    } else {
+                        a.dealloc(ptr, layout);
+                        ptr::write(self, ByteString::new(new_len, a));
+                    }
+                }
             }
         }
     }
