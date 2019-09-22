@@ -362,7 +362,7 @@ impl ByteString for Box<[u8]> {
 
     fn new(len: usize, mut a: Global) -> Self {
         unsafe {
-            let layout = Layout::array::<u8>(len).unwrap();
+            let layout = Layout::from_size_align_unchecked(len, mem::align_of::<u8>());
             let value = a.alloc_zeroed(layout).unwrap_or_else(|_| alloc::handle_alloc_error(layout));
             let slice = slice::from_raw_parts_mut(value.as_ptr(), len);
             Box::from_raw(slice)
@@ -375,8 +375,8 @@ impl ByteString for Box<[u8]> {
             (0, new_len) => { // we don't need to deallocate and instead we can just allocate and write
                 *self = ByteString::new(new_len, a);
             },
-            (len, 0) => unsafe { // we just need to deallocate and write an empty slice
-                let layout = Layout::array::<u8>(len).unwrap();
+            (_, 0) => unsafe { // we just need to deallocate and write an empty slice
+                let layout = Layout::for_value(self);
                 let b = ptr::read(self);
                 let ptr = Box::into_raw_non_null(b).cast::<u8>();
                 a.dealloc(ptr, layout);
@@ -386,7 +386,7 @@ impl ByteString for Box<[u8]> {
                 if old_len == new_len {
                     ptr::write_bytes(self.as_mut_ptr(), 0, new_len);
                 } else {
-                    let layout = Layout::array::<u8>(old_len).unwrap();
+                    let layout = Layout::for_value(self);
                     let b = ptr::read(self);
                     let ptr = Box::into_raw_non_null(b).cast::<u8>();
                     let result = 
