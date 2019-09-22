@@ -3,6 +3,7 @@
 use crate::{collections, raw};
 use either::{Either, Left, Right};
 use std::alloc::{self, Layout, Alloc, Global};
+use std::cmp;
 use std::convert::{TryInto, TryFrom};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -416,9 +417,8 @@ impl ByteString for Vec<u8> {
     fn resize(&mut self, new_len: usize) {
         let old_len = self.len();
         self.resize(new_len, 0);
-        if old_len <= new_len {
-            unsafe { ptr::write_bytes(self[0..old_len].as_mut_ptr(), 0, old_len) };
-        }
+        let old_data = &mut self[0..cmp::min(old_len, new_len)];
+        unsafe { ptr::write_bytes(old_data.as_mut_ptr(), 0, old_data.len()); }
     }
 }
 
