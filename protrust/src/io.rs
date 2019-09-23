@@ -242,7 +242,7 @@ impl TryFrom<u32> for Tag {
 
 /// An opaque type that represents the length of a delimited value
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Length(pub(crate) i32);
+pub struct Length(i32);
 
 impl Display for Length {
     fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
@@ -255,6 +255,27 @@ impl Length {
     #[inline]
     pub const fn get(self) -> i32 {
         self.0
+    }
+
+    /// Makes a new length from the specified [`i32`], returning [`None`] if the value is negative
+    /// 
+    /// [`i32`]: https://doc.rust-lang.org/nightly/std/primitive.i32.html
+    /// [`None`]: https://doc.rust-lang.org/nightly/std/option/enum.Option.html#variant.None
+    pub fn new(x: i32) -> Option<Length> {
+        if x < 0 {
+            None
+        } else {
+            unsafe { Some(Length::new_unchecked(x)) }
+        }
+    }
+
+    /// Makes a new length from the specified [`i32`], without checking if the value is negative.
+    /// 
+    /// # Safety
+    /// 
+    /// Providing a negative value may cause 
+    pub const unsafe fn new_unchecked(x: i32) -> Length {
+        Length(x)
     }
 
     /// Calculates the length of the value

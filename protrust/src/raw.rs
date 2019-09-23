@@ -515,10 +515,10 @@ impl<T: LiteMessage> Heaping for Group<T> {
 
 #[inline]
 pub(crate) const fn raw_varint32_size(value: u32) -> Length {
-    Length((((31 ^ (value | 1).leading_zeros()) * 9 + 73) / 64) as i32)
+    unsafe { Length::new_unchecked((((31 ^ (value | 1).leading_zeros()) * 9 + 73) / 64) as i32) }
 }
 
 #[inline]
 pub(crate) const fn raw_varint64_size(value: u64) -> Length {
-    Length((((63 ^ (value | 1).leading_zeros()) * 9 + 73) / 64) as i32)
+    unsafe { Length::new_unchecked((((63 ^ (value | 1).leading_zeros()) * 9 + 73) / 64) as i32) }
 }
