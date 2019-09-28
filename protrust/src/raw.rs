@@ -1,10 +1,10 @@
 //! Contains types for protobuf values and traits for value operations. 
 //! Each value with specific serialization or deserialization, a specific 
 
+use alloc::alloc::Global;
+use core::convert::TryInto;
 use crate::{internal::Sealed, CodableMessage, LiteMessage};
 use crate::io::{self, WireType, ByteString, Length, LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult};
-use std::alloc::Global;
-use std::convert::TryInto;
 use trapper::{newtype, Wrapper};
 
 /// A value capable of merging itself with an input value, writing itself to an output, calculating it's size, and checking it's initialization.
@@ -361,7 +361,7 @@ impl ConstSized for Bool {
 
 newtype! {
     /// A string value. This is encoded as a length-delimited series of bytes.
-    pub type String(std::string::String);
+    pub type String(alloc::string::String);
 }
 
 impl Sealed for String { }
@@ -384,7 +384,7 @@ impl Heaping for String {
     type Alloc = Global;
 
     fn read_new(input: &mut CodedReader, a: Global) -> ReaderResult<Self> {
-        std::string::String::from_utf8(input.read_value_in::<Bytes<_>>(a)?)
+        alloc::string::String::from_utf8(input.read_value_in::<Bytes<_>>(a)?)
             .map_err(io::ReaderError::InvalidString)
             .map(Self)
     }

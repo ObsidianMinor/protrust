@@ -5,13 +5,14 @@
 //! 
 //! Unknown fields for unique field numbers can exist for multiple wire types at once to ensure that all data is properly returned.
 
+use alloc::alloc::{Alloc, Global};
+use alloc::boxed::Box;
+use alloc::vec::{self, Vec};
+use core::ops::RangeBounds;
 use crate::{internal, Mergable, FieldSet, FieldReadState};
 use crate::io::{FieldNumber, WireType, Tag, LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult};
 use crate::raw;
 use hashbrown::{HashMap, hash_map};
-use std::alloc::{Alloc, Global};
-use std::ops::RangeBounds;
-use std::vec;
 
 /// An unknown field in an [`UnknownFieldSet`](struct.UnknownFieldSet.html).
 #[derive(Clone, Debug)]
@@ -124,7 +125,7 @@ impl UnknownFieldSet<Global> {
     fn add_field_from(&mut self, input: &mut CodedReader) -> ReaderResult<()> {
         if let Some(last_tag) = input.last_tag() {
             match last_tag.wire_type() {
-                WireType::Varint => self.push_value(last_tag.number(), UnknownField::Varint(dbg!(input.read_varint64()?))),
+                WireType::Varint => self.push_value(last_tag.number(), UnknownField::Varint(input.read_varint64()?)),
                 WireType::Bit64 => self.push_value(last_tag.number(), UnknownField::Bit64(input.read_bit64()?)),
                 WireType::LengthDelimited => self.push_value(last_tag.number(), UnknownField::LengthDelimited(input.read_length_delimited::<_>(self.alloc.clone())?)),
                 WireType::StartGroup => {
@@ -242,7 +243,8 @@ mod test {
     use super::{UnknownFieldSet, UnknownField};
     use crate::io::{Tag, FieldNumber, WireType, Length, CodedWriter, CodedReader};
     use crate::raw;
-    use std::alloc::Global;
+    use alloc::alloc::Global;
+    use alloc::vec::Vec;
 
     #[test]
     fn sizes() {
@@ -260,7 +262,7 @@ mod test {
             set
         };
 
-        assert_eq!(Length::for_fields(&set).unwrap().get(), 11);
+        assert_eq!(Length::for_fields(&set).unwrap().get(), 10);
 
         let set = {
             let group = set;
@@ -298,19 +300,17 @@ mod test {
             data.into_boxed_slice()
         };
 
-        dbg!(&input);
-
         let mut reader = CodedReader::with_slice(&input);
 
-        dbg!(reader.read_tag().unwrap());
+        reader.read_tag().unwrap();
         reader.try_add_field_to(&mut set).unwrap().or_skip().unwrap();
-        dbg!(reader.read_tag().unwrap());
+        reader.read_tag().unwrap();
         reader.try_add_field_to(&mut set).unwrap().or_skip().unwrap();
-        dbg!(reader.read_tag().unwrap());
+        reader.read_tag().unwrap();
         reader.try_add_field_to(&mut set).unwrap().or_skip().unwrap();
-        dbg!(reader.read_tag().unwrap());
+        reader.read_tag().unwrap();
         reader.try_add_field_to(&mut set).unwrap().or_skip().unwrap();
-        dbg!(reader.read_tag().unwrap());
+        reader.read_tag().unwrap();
         reader.try_add_field_to(&mut set).unwrap().or_skip().unwrap();
 
         assert_eq!(set.values(number).len(), 6); // existing field + 5 added fields. the group counts as one field

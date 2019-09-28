@@ -1,19 +1,25 @@
 //! Contains types and traits for reading and writing protobuf coded data.
 
+pub mod stream;
+
+use alloc::alloc::{Layout, Alloc, Global, handle_alloc_error};
+use alloc::boxed::Box;
+use alloc::string::FromUtf8Error;
+use alloc::vec::Vec;
+use core::cmp;
+use core::convert::{TryInto, TryFrom};
+use core::fmt::{self, Display, Formatter};
+use core::mem;
+use core::num::NonZeroU32;
+use core::ptr;
+use core::slice;
 use crate::{collections, raw};
 use either::{Either, Left, Right};
-use std::alloc::{self, Layout, Alloc, Global};
-use std::cmp;
-use std::convert::{TryInto, TryFrom};
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
-use std::io::{self, Read, BufReader, Write};
-use std::mem;
-use std::num::NonZeroU32;
-use std::ptr::{self, NonNull};
-use std::slice;
-use std::string::FromUtf8Error;
+use self::stream::{Read, Write};
 use trapper::Wrapper;
+
+#[cfg(feature = "std")]
+use std::error::Error;
 
 /// The wire type of a protobuf value.
 ///
@@ -212,6 +218,7 @@ impl Display for TryTagFromRawError {
     }
 }
 
+#[cfg(feature = "std")]
 impl Error for TryTagFromRawError { }
 
 impl TryFrom<u32> for Tag {
@@ -306,7 +313,7 @@ impl From<Length> for i32 {
 /// An opaque type for building a length for writing to an output.
 /// 
 /// This exists to make creating checked lengths easier in generated code.
-pub struct LengthBuilder(pub(crate) i32);
+pub struct LengthBuilder(i32);
 
 impl LengthBuilder {
     /// Creates a new length builder
@@ -385,7 +392,7 @@ impl ByteString for Box<[u8]> {
     fn new(len: usize, mut a: Global) -> Self {
         unsafe {
             let layout = Layout::from_size_align_unchecked(len, mem::align_of::<u8>());
-            let value = a.alloc_zeroed(layout).unwrap_or_else(|_| alloc::handle_alloc_error(layout));
+            let value = a.alloc_zeroed(layout).unwrap_or_else(|_| handle_alloc_error(layout));
             let slice = slice::from_raw_parts_mut(value.as_ptr(), len);
             Box::from_raw(slice)
         }
@@ -397,21 +404,17 @@ impl ByteString for Box<[u8]> {
             (0, new_len) => { // we don't need to deallocate and instead we can just allocate and write
                 *self = ByteString::new(new_len, a);
             },
-            (_, 0) => unsafe { // we just need to deallocate and write an empty slice
-                let layout = Layout::for_value(self);
-                let b = ptr::read(self);
-                let ptr = Box::into_raw_non_null(b).cast::<u8>();
-                a.dealloc(ptr, layout);
-                ptr::write(self, Box::from_raw(slice::from_raw_parts_mut(NonNull::dangling().as_ptr(), 0)));
+            (_, 0) => { // we just need to deallocate and write an empty slice
+                *self = Box::new([]);
             },
             (old_len, new_len) => unsafe {
                 if old_len == new_len {
                     ptr::write_bytes(self.as_mut_ptr(), 0, new_len);
                 } else {
-                    let layout = Layout::for_value(self);
-                    let b = ptr::read(self);
-                    let ptr = Box::into_raw_non_null(b).cast::<u8>();
-                    let result = 
+                    let old = mem::replace(self, Box::new([]));
+                    let layout = Layout::for_value::<[u8]>(&old);
+                    let ptr = Box::into_raw_non_null(old).cast::<u8>();
+                    let result =
                         if old_len > new_len {
                             a.shrink_in_place(ptr, layout, new_len)
                         } else {
@@ -419,9 +422,10 @@ impl ByteString for Box<[u8]> {
                         };
                     if let Ok(()) = result {
                         ptr::write_bytes(ptr.as_ptr(), 0, new_len); // no guarantee that the newly available memory is zeroed
+                        *self = Box::from_raw(slice::from_raw_parts_mut(ptr.as_ptr(), new_len));
                     } else {
                         a.dealloc(ptr, layout);
-                        ptr::write(self, ByteString::new(new_len, a));
+                        *self = ByteString::new(new_len, a);
                     }
                 }
             }
@@ -432,8 +436,8 @@ impl ByteString for Box<[u8]> {
 impl ByteString for Vec<u8> {
     type Alloc = Global;
 
-    fn new(len: usize, _: Global) -> Self {
-        vec![0u8; len]
+    fn new(len: usize, a: Global) -> Self {
+        <Box<[u8]> as ByteString>::new(len, a).into_vec()
     }
     fn resize(&mut self, new_len: usize) {
         let old_len = self.len();
@@ -453,14 +457,14 @@ pub enum ReaderError {
     /// The input contained an invalid tag (zero or the tag had an invalid wire format)
     InvalidTag(u32),
     /// An error occured while reading from the underlying `Read` object
-    IoError(io::Error),
+    StreamError(stream::Error),
     /// The input contained an invalid UTF8 string
     InvalidString(FromUtf8Error),
 }
 
-impl From<io::Error> for ReaderError {
-    fn from(value: io::Error) -> ReaderError {
-        ReaderError::IoError(value)
+impl From<stream::Error> for ReaderError {
+    fn from(value: stream::Error) -> ReaderError {
+        ReaderError::StreamError(value)
     }
 }
 
@@ -476,16 +480,17 @@ impl Display for ReaderError {
             ReaderError::MalformedVarint => write!(fmt, "the input contained an invalid variable length integer"),
             ReaderError::NegativeSize => write!(fmt, "the input contained a length delimited value which reported it had a negative size"),
             ReaderError::InvalidTag(val) => write!(fmt, "the input contained an tag that was either invalid or was unexpected at this point in the input: {}", val),
-            ReaderError::IoError(_) => write!(fmt, "an error occured in the underlying input"),
+            ReaderError::StreamError(_) => write!(fmt, "an error occured in the underlying input"),
             ReaderError::InvalidString(_) => write!(fmt, "the input contained an invalid UTF8 string")
         }
     }
 }
 
+#[cfg(feature = "std")]
 impl Error for ReaderError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            ReaderError::IoError(ref e) => Some(e),
+            ReaderError::StreamError(ref e) => Some(e),
             ReaderError::InvalidString(ref e) => Some(e),
             _ => None,
         }
@@ -493,13 +498,11 @@ impl Error for ReaderError {
 }
 
 /// A result for a [`CodedReader`](struct.CodedReader.html) read operation
-pub type ReaderResult<T> = std::result::Result<T, ReaderError>;
+pub type ReaderResult<T> = core::result::Result<T, ReaderError>;
 
-#[derive(Copy, Clone, Debug)]
-/// A set of options that can be used to modify the behavior of [`CodedReader`](struct.CodedReader.html)
-pub struct ReaderOptions {
-    /// Indicates if unknown field sets should skip reading fields
-    pub skip_unknown_fields: bool,
+#[derive(Clone, Debug)]
+struct ReaderOptions {
+    skip_unknown_fields: bool,
 }
 
 impl Default for ReaderOptions {
@@ -510,85 +513,234 @@ impl Default for ReaderOptions {
     }
 }
 
+/// A builder used to construct [`CodedReader`](struct.CodedReader.html) instances
+#[derive(Clone, Debug, Default)]
+pub struct ReaderBuilder {
+    options: ReaderOptions
+}
+
+impl ReaderBuilder {
+    /// Creates a new builder with the default configuration
+    #[inline]
+    pub fn new() -> Self {
+        Default::default()
+    }
+    /// Sets whether unknown field sets should skip unknown fields
+    #[inline]
+    pub fn skip_unknown_fields(mut self, value: bool) -> Self {
+        self.options.skip_unknown_fields = value;
+        self
+    }
+    /// Constructs a [`CodedReader`](struct.CodedReader.html) using this builder and 
+    /// the specified slice of bytes
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::{CodedReader, ReaderBuilder};
+    /// 
+    /// let data = [8, 15];
+    /// let mut reader =
+    ///     ReaderBuilder::new()
+    ///         .skip_unknown_fields(true)
+    ///         .with_slice(&data);
+    /// ```
+    #[inline]
+    pub fn with_slice<'a>(&self, inner: &'a [u8]) -> CodedReader<'a> {
+        CodedReader {
+            inner: Right(Cursor::new(inner)),
+            limit: None,
+            last_tag: None,
+            options: self.options.clone()
+        }
+    }
+    /// Constructs a [`CodedReader`](struct.CodedReader.html) using this builder and 
+    /// the specified [`Read`](stream/trait.Read.html) object with the default buffer capacity
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::{CodedReader, ReaderBuilder};
+    /// 
+    /// let data = [8, 15];
+    /// let mut reader =
+    ///     ReaderBuilder::new()
+    ///         .skip_unknown_fields(true)
+    ///         .with_slice(&data);
+    /// ```
+    #[inline]
+    pub fn with_read<'a>(&self, inner: &'a mut dyn Read) -> CodedReader<'a> {
+        self.with_capacity(DEFAULT_BUF_SIZE, inner)
+    }
+    /// Constructs a [`CodedReader`](struct.CodedReader.html) using this builder and
+    /// the specified [`Read`](stream/trait.Read.html) object with the specified buffer capacity
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::{CodedReader, ReaderBuilder};
+    /// 
+    /// let data = [8, 15];
+    /// let mut reader =
+    ///     ReaderBuilder::new()
+    ///         .skip_unknown_fields(true)
+    ///         .with_slice(&data);
+    /// ```
+    #[inline]
+    pub fn with_capacity<'a>(&self, capacity: usize, inner: &'a mut dyn Read) -> CodedReader<'a> {
+        CodedReader {
+            inner: Left(ReadWithBuffer::new(inner, capacity)),
+            limit: None,
+            last_tag: None,
+            options: self.options.clone()
+        }
+    }
+}
+
+const DEFAULT_BUF_SIZE: usize = 8 * 1024;
+
+struct ReadWithBuffer<'a> {
+    inner: &'a mut dyn Read,
+    buf: Box<[u8]>,
+    cap: usize,
+    pos: usize
+}
+
+impl<'a> ReadWithBuffer<'a> {
+    #[inline]
+    fn new(inner: &'a mut dyn Read, cap: usize) -> ReadWithBuffer<'a> {
+        let buf = unsafe {
+            let mut buf = Vec::with_capacity(cap);
+            buf.set_len(cap);
+            buf.into_boxed_slice()
+        };
+        ReadWithBuffer { inner, buf, cap: 0, pos: 0 }
+    }
+    fn buffer(&self) -> &[u8] {
+        &self.buf[self.pos..self.cap]
+    }
+    fn consume(&mut self, len: i32) {
+        self.pos += len as usize;
+        if self.pos >= self.cap {
+            self.pos = 0;
+            self.cap = 0;
+        }
+    }
+    fn read_exact(&mut self, buf: &mut [u8]) -> ReaderResult<()> {
+        let buffer = self.buffer();
+        if buffer.len() >= buf.len() {
+            buf.copy_from_slice(&buffer[..buf.len()]);
+        } else {
+            let (copyable, mut remainder) = buf.split_at_mut(buffer.len());
+            copyable.copy_from_slice(buffer);
+            while !remainder.is_empty() {
+                let amnt = self.inner.read(remainder)?;
+                if amnt == 0 {
+                    return Err(stream::Error.into());
+                }
+                remainder = &mut remainder[amnt..];
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct Cursor<'a> {
+    buf: &'a [u8],
+    pos: usize
+}
+
+impl<'a> Cursor<'a> {
+    #[inline]
+    fn new(buf: &'a [u8]) -> Cursor<'a> {
+        Cursor { buf, pos: 0 }
+    }
+    #[inline]
+    fn get(&self) -> &[u8] {
+        unsafe { self.buf.get_unchecked(self.pos..) }
+    }
+    #[inline]
+    fn consume(&mut self, amnt: i32) {
+        debug_assert!(self.pos + amnt as usize <= self.buf.len());
+
+        self.pos += amnt as usize;
+    }
+}
+
+#[inline]
+fn apply_limit(buf: &[u8], limit: Option<i32>) -> &[u8] {
+    if let Some(limit) = limit {
+        &buf[..cmp::min(buf.len(), limit as usize)]
+    } else {
+        buf
+    }
+}
+
 /// A coded input reader that reads from a borrowed [`BufRead`].
 /// 
 /// [`BufRead`]: https://doc.rust-lang.org/nightly/std/io/trait.BufRead.html
 pub struct CodedReader<'a> {
-    inner: Either<BufReader<&'a mut dyn Read>, &'a [u8]>,
+    inner: Either<ReadWithBuffer<'a>, Cursor<'a>>,
     limit: Option<i32>,
     last_tag: Option<Tag>,
     options: ReaderOptions,
 }
 
 impl<'a> CodedReader<'a> {
-    /// Creates a new [`CodedReader`] over the borrowed [`Read`].
+    /// Creates a new [`CodedReader`] in the default configuration
+    ///  over the borrowed [`Read`] with the default buffer capacity.
     /// 
     /// [`CodedReader`]: struct.CodedReader.html
     /// [`Read`]: https://doc.rust-lang.org/nightly/std/io/trait.Read.html
     #[inline]
     pub fn with_read(inner: &'a mut dyn Read) -> Self {
-        Self { 
-            inner: Left(BufReader::new(inner)),
-            limit: None,
-            last_tag: None,
-            options: Default::default()
-        }
+        ReaderBuilder::new().with_read(inner)
     }
-    /// Creates a new [`CodedReader`] over the borrowed [`Read`] with a specified inner buffer capacity.
+    /// Creates a new [`CodedReader`] in the default configuration
+    /// over the borrowed [`Read`] with the specified buffer capacity.
     /// 
     /// [`CodedReader`]: struct.CodedReader.html
-    /// [`Read`]: https://doc.rust-lang.org/nightly/std/io/trait.Read.html
+    /// [`Read`]: streams/trait.Read.html
     #[inline]
-    pub fn with_capacity(cap: usize, inner: &'a mut dyn Read) -> Self {
-        Self { 
-            inner: Left(BufReader::with_capacity(cap, inner)),
-            limit: None,
-            last_tag: None,
-            options: Default::default()
-        }
+    pub fn with_capacity(capacity: usize, inner: &'a mut dyn Read) -> Self {
+        ReaderBuilder::new().with_capacity(capacity, inner)
     }
-    /// Creates a new [`CodedReader`] over the borrowed [`slice`].
-    /// This is optimized to read directly from the slice, making it faster than reading from a [`BufRead`] object.
+    /// Creates a new [`CodedReader`] over the borrowed [`slice`]
+    /// in the default configuration. This is optimized to read directly
+    /// from the slice, making it faster than reading from a [`Read`] object.
     /// 
     /// [`CodedReader`]: struct.CodedReader.html
     /// [`slice`]: https://doc.rust-lang.org/nightly/std/primitive.slice.html
-    /// [`BufRead`]: https://doc.rust-lang.org/nightly/std/io/trait.BufRead.html
+    /// [`Read`]: streams/trait.Read.html
     #[inline]
     pub fn with_slice(inner: &'a [u8]) -> Self {
-        Self { 
-            inner: Right(inner),
-            limit: None,
-            last_tag: None,
-            options: Default::default()
-        }
+        ReaderBuilder::new().with_slice(inner)
     }
 
-    /// Sets options in use by the reader
-    pub fn with_options(mut self, options: ReaderOptions) -> Self {
-        self.options = options;
-        self
+    #[inline]
+    fn consume_limit(&mut self, len: i32) {
+        if let Some(limit) = self.limit.as_mut() {
+            *limit -= len;
+        }
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> ReaderResult<()> {
-        if let Some(limit) = self.limit {
-            if buf.len() > limit as usize {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-            } else {
-                self.limit = Some(limit - buf.len() as i32);
-            }
-        }
         match self.inner {
-            Left(ref mut read) => read.read_exact(buf)?,
-            Right(ref mut slice) => {
-                if slice.len() < buf.len() {
-                    return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-                }
-                unsafe {
-                    ptr::copy_nonoverlapping(slice.as_ptr(), buf.as_mut_ptr(), buf.len());
-                    *slice = slice.get_unchecked(buf.len()..);
-                }
+            Left(ref mut read) => {
+                read.read_exact(buf)?;
+                read.consume(buf.len() as i32);
+            },
+            Right(ref mut curs) => {
+                let slice = 
+                    apply_limit(curs.get(), self.limit)
+                        .get(..buf.len())
+                        .ok_or(ReaderError::from(stream::Error))?;
+                buf.copy_from_slice(slice);
+                curs.consume(buf.len() as i32);
             }
         }
+        self.consume_limit(buf.len() as i32);
         Ok(())
     }
 
@@ -628,7 +780,7 @@ impl<'a> CodedReader<'a> {
     /// specified amount.
     #[inline]
     pub fn push_length(&mut self, length: Length) -> Option<Length> {
-        std::mem::replace(&mut self.limit, Some(length.get())).map(Length)
+        core::mem::replace(&mut self.limit, Some(length.get())).map(Length)
     }
 
     /// Returns an old length to the reader.
@@ -650,41 +802,7 @@ impl<'a> CodedReader<'a> {
     /// Reads a tag from the input, returning none if there is no more data available in the input.
     #[inline]
     pub fn read_tag(&mut self) -> ReaderResult<Option<Tag>> {
-        let mut buf = [0u8; 1];
-        let amnt = self.inner.read(&mut buf)?;
-        if amnt == 0 {
-            self.last_tag = None;
-            return Ok(None);
-        }
-        unsafe {
-            let b = *buf.get_unchecked(0);
-            let mut value = (b & 0x7F) as u32;
-            if b >= 0x80 {
-                let tag = Tag::try_from(value).map_err(|_| ReaderError::InvalidTag(value))?;
-                self.last_tag = Some(tag);
-                return Ok(Some(tag));
-            }
-            for i in 1..5 {
-                self.read_exact(&mut buf)?;
-                let b = *buf.get_unchecked(0) as u32;
-                value |= (b & 0x7F) << (7 * i);
-                if b >= 0x80 {
-                    let tag = Tag::try_from(value).map_err(|_| ReaderError::InvalidTag(value))?;
-                    self.last_tag = Some(tag);
-                    return Ok(Some(tag));
-                }
-            }
-            for _ in 0..5 {
-                self.read_exact(&mut buf)?;
-                let b = *buf.get_unchecked(0) as u32;
-                if b >= 0x80 {
-                    let tag = Tag::try_from(value).map_err(|_| ReaderError::InvalidTag(value))?;
-                    self.last_tag = Some(tag);
-                    return Ok(Some(tag));
-                }
-            }
-        }
-        Err(ReaderError::MalformedVarint)
+        unimplemented!()
     }
 
     /// Reads a 32-bit varint from the input. This is optimized for 32-bit varint values and will discard 
@@ -758,6 +876,7 @@ impl<'a> CodedReader<'a> {
     pub fn merge_length_delimited<T: ByteString>(&mut self, value: &mut T) -> ReaderResult<()> {
         let length = self.read_length()?.get();
         value.resize(length as usize);
+
         debug_assert!(value.as_ref().len() == length as usize);
 
         self.read_exact(value.as_mut())?;
@@ -829,21 +948,42 @@ impl<'a> CodedReader<'a> {
 /// The error type for [`CodedWriter`](struct.CodedWriter.html)
 #[derive(Debug)]
 pub enum WriterError {
-    /// An error used by consumer code used to indicate a value was 
-    /// provided that was too large to write to an output
+    /// An error used to indicate a value was provided that was 
+    /// too large to write to an output.
     ValueTooLarge,
-    /// An error occured while writing data to the output
-    IoError(io::Error)
+    /// An error occured while writing data to the output.
+    /// For slice outputs, this is used to indicate if
+    /// not all data could be written to the slice.
+    IoError(stream::Error)
 }
 
-impl From<io::Error> for WriterError {
-    fn from(e: io::Error) -> Self {
+impl Display for WriterError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            WriterError::ValueTooLarge => write!(f, "the value was too large to write to the output"),
+            WriterError::IoError(_) => write!(f, "an error occured while writing to the output")
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl Error for WriterError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            WriterError::IoError(e) => Some(e),
+            _ => None
+        }
+    }
+}
+
+impl From<stream::Error> for WriterError {
+    fn from(e: stream::Error) -> Self {
         Self::IoError(e)
     }
 }
 
 /// A result for a [`CodedWriter`](struct.CodedWriter.html) read operation
-pub type WriterResult = std::result::Result<(), WriterError>;
+pub type WriterResult = core::result::Result<(), WriterError>;
 
 /// A coded input writer that writes to a borrowed [`Write`].
 /// 
@@ -899,7 +1039,7 @@ impl<'a> CodedWriter<'a> {
                         if value == 0 {
                             *buf.get_unchecked_mut(i - 1) |= 0x80;
                             let part = buf.get_unchecked(0..i);
-                            write.write_all(part)?;
+                            write.write(part)?;
                             return Ok(())
                         }
                     }
@@ -907,7 +1047,7 @@ impl<'a> CodedWriter<'a> {
             },
             Right(ref mut buf) => {
                 if raw::raw_varint32_size(value).get() as usize > buf.len() {
-                    return Err(io::Error::from(io::ErrorKind::WriteZero).into());
+                    return Err(stream::Error.into());
                 }
 
                 let mut i = 0;
@@ -942,7 +1082,7 @@ impl<'a> CodedWriter<'a> {
                         if value == 0 {
                             *buf.get_unchecked_mut(i - 1) |= 0x80;
                             let part = buf.get_unchecked(0..i);
-                            write.write_all(part)?;
+                            write.write(part)?;
                             return Ok(())
                         }
                     }
@@ -950,7 +1090,7 @@ impl<'a> CodedWriter<'a> {
             },
             Right(ref mut buf) => {
                 if raw::raw_varint64_size(value).get() as usize > buf.len() {
-                    return Err(io::Error::from(io::ErrorKind::WriteZero).into());
+                    return Err(stream::Error.into());
                 }
 
                 let mut i = 0;
@@ -977,10 +1117,10 @@ impl<'a> CodedWriter<'a> {
         const SIZE: usize = mem::size_of::<u32>();
 
         match self.inner {
-            Left(ref mut i) => i.write_all(&value)?,
+            Left(ref mut i) => i.write(&value)?,
             Right(ref mut buf) => {
                 if buf.len() < SIZE {
-                    return Err(io::Error::from(io::ErrorKind::WriteZero).into());
+                    return Err(stream::Error.into());
                 } else {
                     unsafe {
                         ptr::copy_nonoverlapping(value.as_ptr(), buf.as_mut_ptr(), SIZE);
@@ -998,7 +1138,7 @@ impl<'a> CodedWriter<'a> {
         let value = value.to_le_bytes();
         const SIZE: usize = mem::size_of::<u64>();
         match self.inner {
-            Left(ref mut i) => i.write_all(&value)?,
+            Left(ref mut i) => i.write(&value)?,
             Right(ref mut buf) => {
                 if buf.len() >= SIZE {
                     unsafe {
@@ -1006,7 +1146,7 @@ impl<'a> CodedWriter<'a> {
                         *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(SIZE), buf.len() - SIZE);
                     }
                 } else {
-                    return Err(io::Error::from(io::ErrorKind::WriteZero).into());
+                    return Err(stream::Error.into());
                 }
             }
         }
@@ -1017,7 +1157,7 @@ impl<'a> CodedWriter<'a> {
     #[inline]
     pub fn write_bytes(&mut self, value: &[u8]) -> WriterResult {
         match &mut self.inner {
-            Left(writer) => writer.write_all(value)?,
+            Left(writer) => writer.write(value)?,
             Right(buf) => {
                 if value.len() <= buf.len() {
                     unsafe {
@@ -1025,7 +1165,7 @@ impl<'a> CodedWriter<'a> {
                         *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(value.len()), buf.len() - value.len());
                     }
                 } else {
-                    return Err(io::Error::from(io::ErrorKind::WriteZero).into())
+                    return Err(stream::Error.into());
                 }
             }
         }
@@ -1063,11 +1203,11 @@ impl<'a> CodedWriter<'a> {
 mod test {
     use assert_matches::assert_matches;
     use crate::io::{CodedWriter, WriterResult, CodedReader, Tag, FieldNumber, WireType};
-    use std::alloc::Global;
+    use alloc::alloc::Global;
+    use alloc::boxed::Box;
 
     mod coded_writer {
-        use assert_matches::assert_matches;
-        use crate::io::{CodedWriter, WriterError, Length};
+        use crate::io::{CodedWriter, Length};
         use crate::raw::{Uint32, Uint64};
 
         #[test]
@@ -1169,10 +1309,10 @@ mod test {
                     let mut empty = [].as_mut();
 
                     let mut writer = CodedWriter::with_slice(empty);
-                    assert_matches!(writer.$f(10), Err(WriterError::IoError(ref err)) if err.kind() == std::io::ErrorKind::WriteZero);
+                    assert!(writer.$f(10).is_err());
 
                     let mut writer = CodedWriter::with_write(&mut empty);
-                    assert_matches!(writer.$f(10), Err(WriterError::IoError(ref err)) if err.kind() == std::io::ErrorKind::WriteZero);
+                    assert!(writer.$f(10).is_err());
                 }
             };
         }
@@ -1187,10 +1327,10 @@ mod test {
             let mut empty = [].as_mut();
 
             let mut writer = CodedWriter::with_slice(empty);
-            assert_matches!(writer.write_bytes(&[1]), Err(WriterError::IoError(ref err)) if err.kind() == std::io::ErrorKind::WriteZero);
+            assert!(writer.write_bytes(&[1]).is_err());
 
             let mut writer = CodedWriter::with_write(&mut empty);
-            assert_matches!(writer.write_bytes(&[1]), Err(WriterError::IoError(ref err)) if err.kind() == std::io::ErrorKind::WriteZero);
+            assert!(writer.write_bytes(&[1]).is_err());
         }
     }
     mod coded_reader {
@@ -1400,7 +1540,7 @@ mod test {
             assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(1).unwrap(), WireType::Varint)));
             assert_matches!(input.read_varint32(), Ok(1));
             assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(2).unwrap(), WireType::Varint)));
-            assert_matches!(input.read_varint64(), Ok(std::u64::MAX));
+            assert_matches!(input.read_varint64(), Ok(core::u64::MAX));
             assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(3).unwrap(), WireType::Bit32)));
             assert_matches!(input.read_bit32(), Ok(123));
             assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(4).unwrap(), WireType::Bit64)));

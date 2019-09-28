@@ -6,8 +6,13 @@
 #![feature(allocator_api)]
 #![feature(alloc_layout_extra)]
 #![feature(box_into_raw_non_null)]
+#![feature(try_reserve)]
 
 #![warn(missing_docs)]
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
 
 mod internal {
     pub trait Sealed { }
@@ -17,10 +22,11 @@ pub mod io;
 pub mod raw;
 pub mod unknown_fields;
 
+use alloc::boxed::Box;
+use alloc::alloc::Alloc;
+use core::fmt::Debug;
+use core::hash::Hash;
 use crate::io::{LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult};
-use std::alloc::Alloc;
-use std::fmt::Debug;
-use std::hash::Hash;
 
 pub use unknown_fields::UnknownFieldSet;
 

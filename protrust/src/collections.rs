@@ -3,8 +3,8 @@
 use crate::{Mergable, internal::Sealed};
 use crate::io::{WireType, FieldNumber, Tag, LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult, WriterError};
 use crate::raw::{self, Heaping, Primitive, Value};
-use std::convert::TryInto;
-use std::hash::Hash;
+use core::convert::TryInto;
+use core::hash::Hash;
 use trapper::Wrapper;
 
 /// A type of value that writes and reads repeated values on the wire, a common trait unifying repeated and map fields.
@@ -32,7 +32,7 @@ pub trait RepeatedHeapingValue<T: Heaping>: RepeatedValue<T> {
 }
 
 /// A repeated field. This is the type used by generated code to represent a repeated field value (if it isn't a map).
-pub type RepeatedField<T> = Vec<T>;
+pub type RepeatedField<T> = alloc::vec::Vec<T>;
 /// A map field. This is the type used by generated code to represent a map field value.
 pub type MapField<T, V> = hashbrown::HashMap<T, V, hashbrown::hash_map::DefaultHashBuilder>;
 
@@ -156,7 +156,13 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
         };
         let mut builder = builder.add_bytes(start_len)?;
         for (key, value) in self {
-            let entry_len = LengthBuilder(2).add_value::<K>(key)?.add_value::<V>(value)?.build().get(); // calculate the length of each entry
+            let entry_len = 
+                LengthBuilder::new()
+                    .add_bytes(2).unwrap()
+                    .add_value::<K>(key)?
+                    .add_value::<V>(value)?
+                    .build()
+                    .get(); // calculate the length of each entry
             builder = builder.add_value::<raw::Uint32>(&(entry_len as u32))?.add_bytes(entry_len)?; // add the length size with the entry size
         }
         Some(builder)
@@ -169,7 +175,8 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
         for (key, value) in self {
             output.write_tag(tag)?;
             let length = 
-                LengthBuilder(2)
+                LengthBuilder::new()
+                    .add_bytes(2).unwrap()
                     .add_value::<K>(key)
                     .and_then(|b| 
                         b.add_value::<V>(value))
