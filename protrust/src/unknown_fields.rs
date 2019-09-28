@@ -9,8 +9,8 @@ use alloc::alloc::{Alloc, Global};
 use alloc::boxed::Box;
 use alloc::vec::{self, Vec};
 use core::ops::RangeBounds;
-use crate::{internal, Mergable, FieldSet, FieldReadState};
-use crate::io::{FieldNumber, WireType, Tag, LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult};
+use crate::{internal, Mergable, FieldSet, TryRead};
+use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
 use crate::raw;
 use hashbrown::{HashMap, hash_map};
 
@@ -46,12 +46,12 @@ impl<A: Alloc + Clone> Mergable for UnknownFieldSet<A> {
 }
 impl FieldSet for UnknownFieldSet<Global> {
     #[inline]
-    fn try_add_field_from<'a, 'b>(&mut self, input: &'a mut CodedReader<'b>) -> ReaderResult<FieldReadState<'a, 'b>> {
+    fn try_add_field_from<'a, 'b>(&mut self, input: &'a mut CodedReader<'b>) -> read::Result<TryRead<'a, 'b>> {
         if input.skip_unknown_fields() || input.last_tag().map(Tag::wire_type) == Some(WireType::EndGroup) {
-            Ok(FieldReadState::Yielded(input))
+            Ok(TryRead::Yielded(input))
         } else {
             self.add_field_from(input)?;
-            Ok(FieldReadState::Consumed)
+            Ok(TryRead::Consumed)
         }
     }
     fn calculate_size(&self, mut builder: LengthBuilder) -> Option<LengthBuilder> {
@@ -89,7 +89,7 @@ impl FieldSet for UnknownFieldSet<Global> {
         }
         Some(builder)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> WriterResult {
+    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
         for (key, values) in &self.inner {
             for value in values {
                 match value {
@@ -122,7 +122,7 @@ impl FieldSet for UnknownFieldSet<Global> {
     fn is_initialized(&self) -> bool { true }
 }
 impl UnknownFieldSet<Global> {
-    fn add_field_from(&mut self, input: &mut CodedReader) -> ReaderResult<()> {
+    fn add_field_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
         if let Some(last_tag) = input.last_tag() {
             match last_tag.wire_type() {
                 WireType::Varint => self.push_value(last_tag.number(), UnknownField::Varint(input.read_varint64()?)),

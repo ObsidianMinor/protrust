@@ -1,7 +1,7 @@
 //! Defines collection types used by generated code for repeated and map fields
 
 use crate::{Mergable, internal::Sealed};
-use crate::io::{WireType, FieldNumber, Tag, LengthBuilder, CodedReader, ReaderResult, CodedWriter, WriterResult, WriterError};
+use crate::io::{read, write, WireType, FieldNumber, Tag, LengthBuilder, CodedReader, CodedWriter};
 use crate::raw::{self, Heaping, Primitive, Value};
 use core::convert::TryInto;
 use core::hash::Hash;
@@ -12,7 +12,7 @@ pub trait RepeatedValue<T>: Sealed {
     /// Calculates the size of the repeated value. This takes a corresponding tag to indicate the packedness of the field if required.
     fn calculate_size(&self, builder: LengthBuilder, tag: Tag) -> Option<LengthBuilder>;
     /// Writes the value to the coded writer. This takes a corresponding tag to indicate the packedness of the field if required.
-    fn write_to(&self, output: &mut CodedWriter, tag: Tag) -> WriterResult;
+    fn write_to(&self, output: &mut CodedWriter, tag: Tag) -> write::Result;
     /// Returns a bool indicating whether all the values in the field are initialized
     fn is_initialized(&self) -> bool;
 }
@@ -21,14 +21,14 @@ pub trait RepeatedPrimitiveValue<T>: RepeatedValue<T> {
     /// Adds entries to the repeated field from the coded reader. This doesn't take a corresponding tag as 
     /// inputs should be able to handle packed or unpacked values if their type supports it, even if the 
     /// field doesn't match with the encoded value's packedness.
-    fn add_entries_from(&mut self, input: &mut CodedReader) -> ReaderResult<()>;
+    fn add_entries_from(&mut self, input: &mut CodedReader) -> read::Result<()>;
 }
 /// A type of value that, when adding entries from an input, requires an allocator to allocate dynamic memory into.
 pub trait RepeatedHeapingValue<T: Heaping>: RepeatedValue<T> {
     /// Adds entries to the repeated field from the coded reader. This doesn't take a corresponding tag as 
     /// inputs should be able to handle packed or unpacked values if their type supports it, even if the 
     /// field doesn't match with the encoded value's packedness. This may allocate memory into the specified allocator.
-    fn add_entries_from(&mut self, input: &mut CodedReader, a: T::Alloc) -> ReaderResult<()>;
+    fn add_entries_from(&mut self, input: &mut CodedReader, a: T::Alloc) -> read::Result<()>;
 }
 
 /// A repeated field. This is the type used by generated code to represent a repeated field value (if it isn't a map).
@@ -61,13 +61,13 @@ impl<T: Value + Wrapper> RepeatedValue<T> for RepeatedField<T::Inner> {
         <Self as ValuesSize<T>>::calculate_size(self, builder)
     }
     #[inline]
-    fn write_to(&self, output: &mut CodedWriter, tag: Tag) -> WriterResult {
+    fn write_to(&self, output: &mut CodedWriter, tag: Tag) -> write::Result {
         if self.is_empty() {
             return Ok(());
         }
 
         if WireType::is_packable(T::WIRE_TYPE) && tag.wire_type() == WireType::LengthDelimited {
-            let len = <Self as ValuesSize<T>>::calculate_size(self, LengthBuilder::new()).ok_or(WriterError::ValueTooLarge)?.build();
+            let len = <Self as ValuesSize<T>>::calculate_size(self, LengthBuilder::new()).ok_or(write::Error::ValueTooLarge)?.build();
             output.write_length(len)?;
             for value in self {
                 output.write_value::<T>(value)?;
@@ -89,7 +89,7 @@ impl<T> RepeatedPrimitiveValue<T> for RepeatedField<T::Inner>
         T: Primitive + Wrapper
 {
     #[inline]
-    fn add_entries_from(&mut self, input: &mut CodedReader) -> ReaderResult<()> {
+    fn add_entries_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
         if let Some(last_tag) = input.last_tag() {
             if WireType::is_packable(T::WIRE_TYPE) && last_tag.wire_type() == WireType::LengthDelimited {
                 let old = input.read_and_push_length()?;
@@ -110,7 +110,7 @@ impl<T> RepeatedHeapingValue<T> for RepeatedField<T::Inner>
         T::Alloc: Clone
 {
     #[inline]
-    fn add_entries_from(&mut self, input: &mut CodedReader, a: T::Alloc) -> ReaderResult<()> {
+    fn add_entries_from(&mut self, input: &mut CodedReader, a: T::Alloc) -> read::Result<()> {
         if let Some(last_tag) = input.last_tag() {
             if WireType::is_packable(T::WIRE_TYPE) && last_tag.wire_type() == WireType::LengthDelimited {
                 let old = input.read_and_push_length()?;
@@ -167,7 +167,7 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
         }
         Some(builder)
     }
-    fn write_to(&self, output: &mut CodedWriter, tag: Tag) -> WriterResult {
+    fn write_to(&self, output: &mut CodedWriter, tag: Tag) -> write::Result {
         if self.is_empty() {
             return Ok(());
         }
@@ -181,7 +181,7 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
                     .and_then(|b| 
                         b.add_value::<V>(value))
                     .map(|b| b.build())
-                    .ok_or(WriterError::ValueTooLarge)?;
+                    .ok_or(write::Error::ValueTooLarge)?;
             output.write_length(length)?;
             output.write_tag(Tag::new(KEY_FIELD, K::WIRE_TYPE))?;
             output.write_value::<K>(key)?;
@@ -202,7 +202,7 @@ impl<K, V> RepeatedPrimitiveValue<(K, V)> for MapField<K::Inner, V::Inner>
         K::Inner: Eq + Hash + Default,
         V::Inner: Default
 {
-    fn add_entries_from(&mut self, input: &mut CodedReader) -> ReaderResult<()> {
+    fn add_entries_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
         let key_tag = Tag::new(KEY_FIELD, K::WIRE_TYPE);
         let value_tag = Tag::new(VALUE_FIELD, V::WIRE_TYPE);
 

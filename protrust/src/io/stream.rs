@@ -2,6 +2,8 @@
 
 use core::cmp;
 use core::fmt::{self, Display, Formatter};
+
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
