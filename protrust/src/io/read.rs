@@ -1,4 +1,4 @@
-//! Contains the `CodedReader`, a reader for reading values from a protobuf encoded byte stream
+//! Defines the `CodedReader`, a reader for reading values from a protobuf encoded byte stream.
 
 use alloc::alloc::Global;
 use alloc::boxed::Box;

@@ -1,3 +1,5 @@
+//! Defines the `CodedWriter`, a writer for writing protobuf encoded values to streams.
+
 use core::convert::TryInto;
 use core::fmt::{self, Display, Formatter};
 use core::mem;

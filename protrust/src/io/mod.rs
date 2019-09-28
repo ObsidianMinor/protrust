@@ -375,7 +375,7 @@ impl LengthBuilder {
 }
 
 /// A string of bytes that can be allocated into a provided allocator.
-/// This is used by [`CodedReader`](struct.CodedReader.html) to read length delimited byte values
+/// This is used by [`CodedReader`](read/struct.CodedReader.html) to read length delimited byte values
 /// into various kinds of byte collections.
 pub trait ByteString: AsRef<[u8]> + AsMut<[u8]> {
     /// The allocator to allocate the byte string into

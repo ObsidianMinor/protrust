@@ -31,11 +31,11 @@ pub use unknown_fields::UnknownFieldSet;
 
 /// An object-safe message value that can merge from an input, calculate its size, write to an output, and get its initialization state
 pub trait CodableMessage {
-    /// Merges this message with data from the specified [`CodedReader`](io/struct.CodedReader.html)
+    /// Merges this message with data from the specified [`CodedReader`](io/read/struct.CodedReader.html)
     fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()>;
     /// Adds the size of the data in the message to the [`LengthBuilder`](io/struct.LengthBuilder.html)
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
-    /// Writes this message's data to the specified [`CodedWriter`](io/struct.CodedWriter.html)
+    /// Writes this message's data to the specified [`CodedWriter`](io/write/struct.CodedWriter.html)
     fn write_to(&self, output: &mut CodedWriter) -> write::Result;
     /// Returns if the message value is initialized
     fn is_initialized(&self) -> bool;
@@ -74,7 +74,7 @@ pub trait LiteMessage: CodableMessage + Sized {
     /// of the message are allocated in the specified allocator
     fn new(a: Self::Alloc) -> Self;
 
-    /// Reads a new instance of the message from a [`CodedReader`](io/struct.CodedReader.html)
+    /// Reads a new instance of the message from a [`CodedReader`](io/read/struct.CodedReader.html)
     fn new_from(input: &mut CodedReader, a: Self::Alloc) -> read::Result<Self> {
         let mut instance = Self::new(a);
         instance.merge_from(input)?;

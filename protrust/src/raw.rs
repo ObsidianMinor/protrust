@@ -16,10 +16,10 @@ pub trait Value: Sized + Sealed {
     /// Calculates the size of the value as encoded on the wire
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
 
-    /// Merges the value with the [`CodedReader`](../io/struct.CodedReader.html)
+    /// Merges the value with the [`CodedReader`](../io/read/struct.CodedReader.html)
     fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()>;
 
-    /// Writes the value to the [`CodedWriter`](../io/struct.CodedWriter.html)
+    /// Writes the value to the [`CodedWriter`](../io/write/struct.CodedWriter.html)
     fn write_to(&self, output: &mut CodedWriter) -> write::Result;
 
     /// Returns if the value is initialized, that is, if all the required fields in the value are set.
@@ -30,7 +30,7 @@ pub trait Primitive: Value {
     /// Reads a new instance of the value
     fn read_new(input: &mut CodedReader) -> read::Result<Self>;
 }
-/// A value which may allocate dynamic memory into a specified allocator.
+/// A value which may allocate dynamic memory into an allocator.
 pub trait Heaping: Value {
     /// The allocator type associated with this value
     type Alloc;
