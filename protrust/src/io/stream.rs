@@ -127,7 +127,7 @@ impl<'a> Write for &'a mut [u8] {
 #[cfg(not(feature = "std"))]
 impl Write for Vec<u8> {
     fn write(&mut self, buf: &[u8]) -> Result<()> {
-        self.try_reserve(buf.len()).map_err(|_| Error)?;
+        self.reserve(buf.len());
         let old_len = self.len();
         unsafe {
             self.set_len(old_len + buf.len());

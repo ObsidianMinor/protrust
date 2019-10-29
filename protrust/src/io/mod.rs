@@ -7,15 +7,13 @@ pub mod write;
 pub use read::CodedReader;
 pub use write::CodedWriter;
 
-use alloc::alloc::{Layout, Alloc, Global, handle_alloc_error};
+use alloc::alloc::Layout;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::cmp;
 use core::convert::TryFrom;
 use core::fmt::{self, Display, Formatter};
 use core::mem;
 use core::num::NonZeroU32;
-use core::ptr;
 use core::slice;
 use crate::{collections, raw};
 use trapper::Wrapper;
@@ -374,86 +372,35 @@ impl LengthBuilder {
     }
 }
 
-/// A string of bytes that can be allocated into a provided allocator.
+/// A generic string of bytes.
 /// This is used by [`CodedReader`](read/struct.CodedReader.html) to read length delimited byte values
 /// into various kinds of byte collections.
 pub trait ByteString: AsRef<[u8]> + AsMut<[u8]> {
-    /// The allocator to allocate the byte string into
-    type Alloc: Alloc;
-
-    /// Creates a new instance of the byte string with the specified allocator. This value must be zeroed.
-    fn new(len: usize, a: Self::Alloc) -> Self;
-
-    /// Resizes the byte string, reusing an existing allocator. This value must be zeroed.
-    fn resize(&mut self, new_len: usize);
+    /// Creates a new instance of the byte string. This value does not need to be zeroed.
+    fn new(len: usize) -> Self;
 }
 
 impl ByteString for Box<[u8]> {
-    type Alloc = Global;
-
-    fn new(len: usize, mut a: Global) -> Self {
+    fn new(len: usize) -> Self {
         unsafe {
             let layout = Layout::from_size_align_unchecked(len, mem::align_of::<u8>());
-            let value = a.alloc_zeroed(layout).unwrap_or_else(|_| handle_alloc_error(layout));
-            let slice = slice::from_raw_parts_mut(value.as_ptr(), len);
+            let ptr = alloc::alloc::alloc(layout);
+            let slice = slice::from_raw_parts_mut(ptr, len);
             Box::from_raw(slice)
-        }
-    }
-    fn resize(&mut self, new_len: usize) {
-        let mut a = Global;
-        match (self.len(), new_len) {
-            (0, 0) => { /* do nothing, since there's nothing here */ },
-            (0, new_len) => { // we don't need to deallocate and instead we can just allocate and write
-                *self = ByteString::new(new_len, a);
-            },
-            (_, 0) => { // we just need to deallocate and write an empty slice
-                *self = Box::new([]);
-            },
-            (old_len, new_len) => unsafe {
-                if old_len == new_len {
-                    ptr::write_bytes(self.as_mut_ptr(), 0, new_len);
-                } else {
-                    let old = mem::replace(self, Box::new([]));
-                    let layout = Layout::for_value::<[u8]>(&old);
-                    let ptr = Box::into_raw_non_null(old).cast::<u8>();
-                    let result =
-                        if old_len > new_len {
-                            a.shrink_in_place(ptr, layout, new_len)
-                        } else {
-                            a.grow_in_place(ptr, layout, new_len)
-                        };
-                    if let Ok(()) = result {
-                        ptr::write_bytes(ptr.as_ptr(), 0, new_len); // no guarantee that the newly available memory is zeroed
-                        *self = Box::from_raw(slice::from_raw_parts_mut(ptr.as_ptr(), new_len));
-                    } else {
-                        a.dealloc(ptr, layout);
-                        *self = ByteString::new(new_len, a);
-                    }
-                }
-            }
         }
     }
 }
 
 impl ByteString for Vec<u8> {
-    type Alloc = Global;
-
-    fn new(len: usize, a: Global) -> Self {
-        <Box<[u8]> as ByteString>::new(len, a).into_vec()
-    }
-    fn resize(&mut self, new_len: usize) {
-        let old_len = self.len();
-        self.resize(new_len, 0);
-        let old_data = &mut self[0..cmp::min(old_len, new_len)];
-        unsafe { ptr::write_bytes(old_data.as_mut_ptr(), 0, old_data.len()); }
+    fn new(len: usize) -> Self {
+        <Box<[u8]> as ByteString>::new(len).into_vec()
     }
 }
 
 #[cfg(test)]
 mod test {
     use assert_matches::assert_matches;
-    use crate::io::{CodedWriter, WriterResult, CodedReader, Tag, FieldNumber, WireType};
-    use alloc::alloc::Global;
+    use crate::io::{CodedWriter, write::Result as WriterResult, CodedReader, Tag, FieldNumber, WireType};
     use alloc::boxed::Box;
 
     #[test]
@@ -481,7 +428,7 @@ mod test {
             assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(4).unwrap(), WireType::Bit64)));
             assert_matches!(input.read_bit64(), Ok(1234567890));
             assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(5).unwrap(), WireType::LengthDelimited)));
-            assert_matches!(input.read_length_delimited::<Box<_>>(Global), Ok(ref value) if value.as_ref().eq(&[12]));
+            assert_matches!(input.read_length_delimited::<Box<_>>(), Ok(ref value) if value.as_ref().eq(&[12]));
         }
 
         // (5 * 1 byte) tags + 1 1 byte varint + 1 10 byte varint + 1 32-bit fixed + 1 64-bit fixed + 1 1 byte length delimited (2 bytes)

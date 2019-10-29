@@ -2,10 +2,7 @@
 
 #![feature(read_initializer)]
 #![feature(specialization)]
-#![feature(allocator_api)]
-#![feature(alloc_layout_extra)]
 #![feature(box_into_raw_non_null)]
-#![feature(try_reserve)]
 
 #![warn(missing_docs)]
 
@@ -22,7 +19,6 @@ pub mod raw;
 pub mod unknown_fields;
 
 use alloc::boxed::Box;
-use alloc::alloc::Alloc;
 use core::fmt::Debug;
 use core::hash::Hash;
 use crate::io::{read, write, LengthBuilder, CodedReader, CodedWriter};
@@ -62,21 +58,17 @@ impl<T: ?Sized + CodableMessage> CodableMessage for Box<T> {
 
 /// An allocator aware LITE message.
 pub trait LiteMessage: CodableMessage + Sized {
-    /// The allocator this message is located in
-    type Alloc: Alloc;
-
     /// Gets a shared reference to the unknown fields in this message
-    fn unknown_fields(&self) -> &UnknownFieldSet<Self::Alloc>;
+    fn unknown_fields(&self) -> &UnknownFieldSet;
     /// Gets a unique reference to the unknown fields in this message
-    fn unknown_fields_mut(&mut self) -> &mut UnknownFieldSet<Self::Alloc>;
+    fn unknown_fields_mut(&mut self) -> &mut UnknownFieldSet;
 
-    /// Creates a new instance of the message where the fields 
-    /// of the message are allocated in the specified allocator
-    fn new(a: Self::Alloc) -> Self;
+    /// Creates a new instance of the message
+    fn new() -> Self;
 
     /// Reads a new instance of the message from a [`CodedReader`](io/read/struct.CodedReader.html)
-    fn new_from(input: &mut CodedReader, a: Self::Alloc) -> read::Result<Self> {
-        let mut instance = Self::new(a);
+    fn new_from(input: &mut CodedReader) -> read::Result<Self> {
+        let mut instance = Self::new();
         instance.merge_from(input)?;
         Ok(instance)
     }
@@ -95,7 +87,6 @@ pub trait Mergable<T = Self>: Sized {
 }
 
 default impl<T: Clone> Mergable for T {
-    #[inline]
     fn merge(&mut self, other: &T) {
         self.clone_from(other)
     }

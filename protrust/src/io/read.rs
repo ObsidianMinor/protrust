@@ -1,6 +1,5 @@
 //! Defines the `CodedReader`, a reader for reading values from a protobuf encoded byte stream.
 
-use alloc::alloc::Global;
 use alloc::boxed::Box;
 use alloc::string::FromUtf8Error;
 use alloc::vec::Vec;
@@ -245,6 +244,22 @@ fn apply_limit(buf: &[u8], limit: Option<i32>) -> &[u8] {
     }
 }
 
+trait FixedVarintArray: AsRef<[u8]> {
+    const LENGTH: usize;
+}
+
+macro_rules! fva {
+    ($($len:literal),*) => {
+        $(
+            impl FixedVarintArray for [u8; $len] {
+                const LENGTH: usize = $len;
+            }
+        )*
+    };
+}
+
+fva!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+
 /// A coded input reader that reads from a borrowed [`BufRead`].
 /// 
 /// [`BufRead`]: https://doc.rust-lang.org/nightly/std/io/trait.BufRead.html
@@ -409,6 +424,24 @@ impl<'a> CodedReader<'a> {
         Err(Error::MalformedVarint)
     }
 
+    fn read_varint32_direct<T: FixedVarintArray>(arr: &T) -> u32 {
+        let mut value = 0u32;
+        let arr = arr.as_ref();
+        for i in 0..cmp::min(T::LENGTH, 5) {
+            value |= ((arr[i] as u32) & 0x7F) << (7 * i);
+        }
+        value
+    }
+
+    fn read_varint64_direct<T: FixedVarintArray>(arr: &T) -> u64 {
+        let mut value = 0u64;
+        let arr = arr.as_ref();
+        for i in 0..T::LENGTH {
+            value |= ((arr[i] as u64) & 0x7F) << (7 * i);
+        }
+        value
+    }
+
     /// Reads a 32-bit little endian value from the input
     #[inline]
     pub fn read_bit32(&mut self) -> Result<u32> {
@@ -427,24 +460,13 @@ impl<'a> CodedReader<'a> {
 
     /// Reads a length delimited value from the input prefixed by a length
     #[inline]
-    pub fn read_length_delimited<T: ByteString>(&mut self, a: T::Alloc) -> Result<T> {
+    pub fn read_length_delimited<T: ByteString>(&mut self) -> Result<T> {
         let length = self.read_length()?.get();
-        let mut value = T::new(length as usize, a);
+        let mut value = T::new(length as usize);
         debug_assert!(value.as_ref().len() == length as usize);
 
         self.read_exact(value.as_mut())?;
         Ok(value)
-    }
-
-    /// Merges a length delimited value from the input prefixed by the length. This may reallocate
-    pub fn merge_length_delimited<T: ByteString>(&mut self, value: &mut T) -> Result<()> {
-        let length = self.read_length()?.get();
-        value.resize(length as usize);
-
-        debug_assert!(value.as_ref().len() == length as usize);
-
-        self.read_exact(value.as_mut())?;
-        Ok(())
     }
 
     #[inline]
@@ -454,7 +476,7 @@ impl<'a> CodedReader<'a> {
             match tag.wire_type() {
                 WireType::Varint => { self.read_varint64()?; },
                 WireType::Bit64 => { self.read_bit64()?; },
-                WireType::LengthDelimited => { self.read_length_delimited::<Box<_>>(Global)?; },
+                WireType::LengthDelimited => { self.read_length_delimited::<Box<_>>()?; },
                 WireType::StartGroup => {
                     let end_tag = Tag::new(tag.number(), WireType::EndGroup);
                     while let Some(tag) = self.read_tag()? {
@@ -474,14 +496,8 @@ impl<'a> CodedReader<'a> {
 
     /// Reads an instance of the specified value
     #[inline]
-    pub fn read_value<T: raw::Primitive + Wrapper>(&mut self) -> Result<T::Inner> {
+    pub fn read_value<T: raw::Value + Wrapper>(&mut self) -> Result<T::Inner> {
         T::read_new(self).map(T::unwrap)
-    }
-
-    /// Reads a heaping values in the specified allocator instance
-    #[inline]
-    pub fn read_value_in<T: raw::Heaping + Wrapper>(&mut self, a: T::Alloc) -> Result<T::Inner> {
-        T::read_new(self, a).map(T::unwrap)
     }
 
     /// Merges an existing instance of a value with a value from the input
@@ -492,14 +508,8 @@ impl<'a> CodedReader<'a> {
 
     /// Adds values from the input to the repeated value
     #[inline]
-    pub fn add_values_to<T: raw::Primitive>(&mut self, value: &mut impl collections::RepeatedPrimitiveValue<T>) -> Result<()> {
+    pub fn add_values_to<T>(&mut self, value: &mut impl collections::RepeatedValue<T>) -> Result<()> {
         value.add_entries_from(self)
-    }
-
-    /// Adds values from the input to the 
-    #[inline]
-    pub fn add_values_to_in<T: raw::Heaping>(&mut self, value: &mut impl collections::RepeatedHeapingValue<T>, a: T::Alloc) -> Result<()> {
-        value.add_entries_from(self, a)
     }
 
     /// Tries to add the field to the set, possibly adding the field or yielding control to another set
@@ -512,7 +522,7 @@ impl<'a> CodedReader<'a> {
 #[cfg(test)]
 mod test {
     use assert_matches::assert_matches;
-    use crate::io::{Tag, FieldNumber, WireType, CodedReader, ReaderError};
+    use crate::io::{Tag, FieldNumber, WireType, CodedReader, read::{Result, Error}};
 
     #[test]
     fn varint32_decode() {
@@ -565,21 +575,21 @@ mod test {
         let data = [0u8; 11];
         let mut reader = CodedReader::with_slice(&data);
 
-        assert_matches!(reader.read_varint32(), Err(ReaderError::MalformedVarint));
+        assert_matches!(reader.read_varint32(), Err(Error::MalformedVarint));
 
         let mut read = data.as_ref();
         let mut reader = CodedReader::with_read(&mut read);
 
-        assert_matches!(reader.read_varint32(), Err(ReaderError::MalformedVarint));
+        assert_matches!(reader.read_varint32(), Err(Error::MalformedVarint));
 
         let mut reader = CodedReader::with_slice(&data);
 
-        assert_matches!(reader.read_varint64(), Err(ReaderError::MalformedVarint));
+        assert_matches!(reader.read_varint64(), Err(Error::MalformedVarint));
 
         let mut read = data.as_ref();
         let mut reader = CodedReader::with_read(&mut read);
 
-        assert_matches!(reader.read_varint64(), Err(ReaderError::MalformedVarint));
+        assert_matches!(reader.read_varint64(), Err(Error::MalformedVarint));
     }
     #[test]
     fn tag_decode() {
@@ -603,13 +613,13 @@ mod test {
         let data = [128]; // a zero tag
         let mut reader = CodedReader::with_slice(&data);
 
-        assert_matches!(reader.read_tag(), Err(ReaderError::InvalidTag(0)));
+        assert_matches!(reader.read_tag(), Err(Error::InvalidTag(0)));
         assert_eq!(reader.last_tag(), None);
 
         let mut bytes = data.as_ref();
         let mut reader = CodedReader::with_read(&mut bytes);
 
-        assert_matches!(reader.read_tag(), Err(ReaderError::InvalidTag(0)));
+        assert_matches!(reader.read_tag(), Err(Error::InvalidTag(0)));
         assert_eq!(reader.last_tag(), None);
     }
     #[test]
