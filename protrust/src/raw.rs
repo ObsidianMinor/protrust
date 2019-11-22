@@ -1,9 +1,10 @@
 //! Contains types for protobuf values and traits for value operations. 
 //! Each value with specific serialization or deserialization, a specific 
 
+use alloc::vec::Vec;
 use core::convert::TryInto;
-use crate::{internal::Sealed, LiteMessage};
-use crate::io::{self, read, write, WireType, ByteString, Length, LengthBuilder, CodedReader, CodedWriter};
+use crate::{internal::Sealed, Message as TraitMessage};
+use crate::io::{self, read, write, WireType, ByteString, Length, LengthBuilder, CodedReader, CodedWriter, Input, Output};
 use trapper::{newtype, Wrapper};
 
 /// A value capable of merging itself with an input value, writing itself to an output, calculating it's size, and checking it's initialization.
@@ -15,17 +16,17 @@ pub trait Value: Sized + Sealed {
     /// Calculates the size of the value as encoded on the wire
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
 
-    /// Merges the value with the [`CodedReader`](../io/read/struct.CodedReader.html)
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()>;
+    /// Merges the value with the [`CodedRead`](../io/read/struct.CodedRead.html)
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()>;
 
-    /// Writes the value to the [`CodedWriter`](../io/write/struct.CodedWriter.html)
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result;
+    /// Writes the value to the [`CodedWrite`](../io/write/struct.CodedWrite.html)
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result;
 
     /// Returns if the value is initialized, that is, if all the required fields in the value are set.
     fn is_initialized(&self) -> bool;
 
     /// Reads a new instance of the value
-    fn read_new(input: &mut CodedReader) -> read::Result<Self>;
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self>;
 }
 /// A value with a constant size. This can be specialized over to enable certain optimizations with size caculations.
 pub trait ConstSized: Value {
@@ -44,15 +45,15 @@ impl Value for Int32 {
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         if self.0 >= 0 {
-            builder.add_bytes(raw_varint32_size(self.0 as u32).get())
+            builder.add_bytes(io::raw_varint32_size(self.0 as u32).get())
         } else {
             builder.add_bytes(10)
         }
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         if self.0 >= 0 {
             output.write_varint32(self.0 as u32)
         } else {
@@ -60,7 +61,7 @@ impl Value for Int32 {
         }
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_varint32().map(|v| Self(v as i32))
     }
 }
@@ -75,16 +76,16 @@ impl Value for Uint32 {
     const WIRE_TYPE: WireType = WireType::Varint;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-        builder.add_bytes(raw_varint32_size(self.0).get())
+        builder.add_bytes(io::raw_varint32_size(self.0).get())
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint32(self.0)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_varint32().map(Self)
     }
 }
@@ -99,16 +100,16 @@ impl Value for Int64 {
     const WIRE_TYPE: WireType = WireType::Varint;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-        builder.add_bytes(raw_varint64_size(self.0 as u64).get())
+        builder.add_bytes(io::raw_varint64_size(self.0 as u64).get())
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint64(self.0 as u64)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_varint64().map(|v| Self(v as i64))
     }
 }
@@ -123,16 +124,16 @@ impl Value for Uint64 {
     const WIRE_TYPE: WireType = WireType::Varint;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-        builder.add_bytes(raw_varint64_size(self.0).get())
+        builder.add_bytes(io::raw_varint64_size(self.0).get())
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint64(self.0)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_varint64().map(Self)
     }
 }
@@ -149,17 +150,17 @@ impl Value for Sint32 {
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         let n = self.0 as u32;
-        builder.add_bytes(raw_varint32_size((n << 1) ^ (n >> 31)).get())
+        builder.add_bytes(io::raw_varint32_size((n << 1) ^ (n >> 31)).get())
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         let n = self.0 as u32;
         output.write_varint32((n << 1) ^ (n >> 31))
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_varint32().map(|v| Self(((v >> 1) ^ (v << 31)) as i32))
     }
 }
@@ -176,17 +177,17 @@ impl Value for Sint64 {
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         let n = self.0 as u64;
-        builder.add_bytes(raw_varint64_size((n << 1) ^ (n >> 63)).get())
+        builder.add_bytes(io::raw_varint64_size((n << 1) ^ (n >> 63)).get())
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         let n = self.0 as u64;
         output.write_varint64((n << 1) ^ (n >> 63))
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_varint64().map(|v| Self(((v >> 1) ^ (v << 63)) as i64))
     }
 }
@@ -203,14 +204,14 @@ impl Value for Fixed32 {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         builder.add_bytes(Self::SIZE)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_bit32(self.0)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_bit32().map(Self)
     }
 }
@@ -230,14 +231,14 @@ impl Value for Fixed64 {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         builder.add_bytes(Self::SIZE)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_bit64(self.0)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_bit64().map(Self)
     }
 }
@@ -257,14 +258,14 @@ impl Value for Sfixed32 {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         builder.add_bytes(Self::SIZE)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_bit32(self.0 as u32)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_bit32().map(|v| Self(v as i32))
     }
 }
@@ -284,14 +285,14 @@ impl Value for Sfixed64 {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         builder.add_bytes(Self::SIZE)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_bit64(self.0 as u64)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_bit64().map(|v| Self(v as i64))
     }
 }
@@ -311,14 +312,14 @@ impl Value for Bool {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         builder.add_bytes(Self::SIZE)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint32(self.0 as u32)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
         input.read_varint32().map(|v| Self(v != 0))
     }
 }
@@ -339,15 +340,15 @@ impl Value for String {
         let len: i32 = self.0.len().try_into().ok()?;
         builder.add_bytes(len)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         output.write_length_delimited(self.0.as_bytes())
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
-        alloc::string::String::from_utf8(input.read_value::<Bytes<_>>()?)
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
+        alloc::string::String::from_utf8(input.read_value::<Bytes<Vec<_>>>()?)
             .map_err(io::read::Error::InvalidString)
             .map(Self)
     }
@@ -366,14 +367,14 @@ impl<T: ByteString> Value for Bytes<T> {
         let len: i32 = self.0.as_ref().len().try_into().ok()?;
         builder.add_bytes(len)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<U: Output>(&self, output: &mut CodedWriter<U>) -> write::Result {
         output.write_length_delimited(self.0.as_ref())
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self> {
         input.read_length_delimited::<T>().map(Self)
     }
 }
@@ -390,14 +391,14 @@ impl<T: crate::Enum> Value for Enum<T> {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         builder.add_value::<Int32>(&self.0.into())
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<U: Output>(&self, output: &mut CodedWriter<U>) -> write::Result {
         Int32(self.0.into()).write_to(output)
     }
     fn is_initialized(&self) -> bool { true }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self> {
         Int32::read_new(input).map(|v| Self(v.0.into()))
     }
 }
@@ -408,28 +409,31 @@ newtype! {
 }
 
 impl<T> Sealed for Message<T> { }
-impl<T: LiteMessage> Value for Message<T> {
+impl<T: TraitMessage> Value for Message<T> {
     const WIRE_TYPE: WireType = WireType::LengthDelimited;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         self.0.calculate_size(builder)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
-        let old = input.read_and_push_length()?;
-        self.0.merge_from(input)?;
-        input.pop_length(old);
+    fn merge_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()> {
+        let len = input.read_limit()?;
+        unsafe {
+            let old = input.push_limit(len)?;
+            self.0.merge_from(input)?;
+            input.pop_limit(old);
+        }
         Ok(())
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
-        let length = Length::for_value::<Self>(&self.0).ok_or(io::write::Error::ValueTooLarge)?;
+    fn write_to<U: Output>(&self, output: &mut CodedWriter<U>) -> write::Result {
+        let length = Length::of_value::<Self>(&self.0).ok_or(io::write::Error::ValueTooLarge)?;
         output.write_length(length)?;
-        self.0.write_to(output)?;
+        TraitMessage::write_to::<U>(&self.0, output)?;
         Ok(())
     }
     fn is_initialized(&self) -> bool {
         self.0.is_initialized()
     }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
+    fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self> {
         let mut t = Self::wrap(T::new());
         t.merge_from(input)?;
         Ok(t)
@@ -442,32 +446,24 @@ newtype! {
 }
 
 impl<T> Sealed for Group<T> { }
-impl<T: LiteMessage> Value for Group<T> {
+impl<T: TraitMessage> Value for Group<T> {
     const WIRE_TYPE: WireType = WireType::StartGroup;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         self.0.calculate_size(builder)
     }
-    fn merge_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn merge_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()> {
         self.0.merge_from(input)
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<U: Output>(&self, output: &mut CodedWriter<U>) -> write::Result {
         self.0.write_to(output)
     }
     fn is_initialized(&self) -> bool {
         self.0.is_initialized()
     }
-    fn read_new(input: &mut CodedReader) -> read::Result<Self> {
-        T::new_from(input).map(Self)
+    fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self> {
+        let mut t = T::new();
+        t.merge_from(input)?;
+        Ok(Self(t))
     }
-}
-
-#[inline]
-pub(crate) const fn raw_varint32_size(value: u32) -> Length {
-    unsafe { Length::new_unchecked((((31 ^ (value | 1).leading_zeros()) * 9 + 73) / 64) as i32) }
-}
-
-#[inline]
-pub(crate) const fn raw_varint64_size(value: u64) -> Length {
-    unsafe { Length::new_unchecked((((63 ^ (value | 1).leading_zeros()) * 9 + 73) / 64) as i32) }
 }

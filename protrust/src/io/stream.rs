@@ -12,7 +12,7 @@ use std::error;
 /// An error type returned when an error occurs while reading from or writing to a stream trait.
 /// 
 /// Encountering this error likely means the stream is invalidated and shouldn't continue to be used.
-/// It also does not communicate the underlying source of the error and implementors of Read should use
+/// It also does not communicate the underlying source of the error and implementors of Read or Write should use
 /// some external way of communicating the underlying error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error;
@@ -52,6 +52,17 @@ pub trait Read {
             }
         }
         Ok(())
+    }
+}
+
+impl<R: Read + ?Sized> Read for &mut R {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        (**self).read(buf)
+    }
+    #[inline]
+    fn skip(&mut self, len: usize) -> Result<()> {
+        (**self).skip(len)
     }
 }
 

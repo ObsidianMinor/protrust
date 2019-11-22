@@ -8,10 +8,11 @@
 use alloc::boxed::Box;
 use alloc::vec::{self, Vec};
 use core::ops::RangeBounds;
-use crate::{internal, Mergable, FieldSet, TryRead};
-use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
+use crate::{internal::Sealed, Mergable};
+use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter, Input, Output};
 use crate::raw;
 use hashbrown::{HashMap, hash_map};
+use super::{FieldSet, TryRead};
 
 /// An unknown field in an [`UnknownFieldSet`](struct.UnknownFieldSet.html).
 #[derive(Clone, Debug)]
@@ -34,7 +35,7 @@ pub struct UnknownFieldSet {
     inner: HashMap<FieldNumber, Vec<UnknownField>>,
 }
 
-impl internal::Sealed for UnknownFieldSet { }
+impl Sealed for UnknownFieldSet { }
 impl Mergable for UnknownFieldSet {
     fn merge(&mut self, other: &Self) {
         for (key, values) in &other.inner {
@@ -44,7 +45,7 @@ impl Mergable for UnknownFieldSet {
 }
 impl FieldSet for UnknownFieldSet {
     #[inline]
-    fn try_add_field_from<'a, 'b>(&mut self, input: &'a mut CodedReader<'b>) -> read::Result<TryRead<'a, 'b>> {
+    fn try_add_field_from<'a, T: Input>(&mut self, input: &'a mut CodedReader<T>) -> read::Result<TryRead<'a, T>> {
         if input.skip_unknown_fields() || input.last_tag().map(Tag::wire_type) == Some(WireType::EndGroup) {
             Ok(TryRead::Yielded(input))
         } else {
@@ -52,42 +53,45 @@ impl FieldSet for UnknownFieldSet {
             Ok(TryRead::Consumed)
         }
     }
-    fn calculate_size(&self, mut builder: LengthBuilder) -> Option<LengthBuilder> {
-        for (key, values) in &self.inner {
-            for value in values {
-                match value {
-                    UnknownField::Varint(v) => {
-                        builder = builder
-                            .add_tag(Tag::new(*key, WireType::Varint))?
-                            .add_value::<raw::Uint64>(v)?;
-                    },
-                    UnknownField::Bit64(v) => {
-                        builder = builder
-                            .add_tag(Tag::new(*key, WireType::Bit64))?
-                            .add_value::<raw::Fixed64>(v)?;
-                    },
-                    UnknownField::LengthDelimited(v) => {
-                        builder = builder
-                            .add_tag(Tag::new(*key, WireType::LengthDelimited))?
-                            .add_value::<raw::Bytes<_>>(v)?;
-                    },
-                    UnknownField::Group(v) => {
-                        builder = builder
-                            .add_tag(Tag::new(*key, WireType::StartGroup))?
-                            .add_fields(v)?
-                            .add_tag(Tag::new(*key, WireType::EndGroup))?;
-                    },
-                    UnknownField::Bit32(v) => {
-                        builder = builder
-                                .add_tag(Tag::new(*key, WireType::Bit32))?
-                                .add_value::<raw::Fixed32>(v)?;
-                    }
-                }
-            }
-        }
-        Some(builder)
+    fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
+        self.inner
+            .iter()
+            .try_fold(builder, |builder, (key, values)| 
+                values
+                    .iter()
+                    .try_fold(builder, |builder, value| {
+                        match value {
+                            UnknownField::Varint(v) => {
+                                builder
+                                    .add_tag(Tag::new(*key, WireType::Varint))?
+                                    .add_value::<raw::Uint64>(v)
+                            },
+                            UnknownField::Bit64(v) => {
+                                builder
+                                    .add_tag(Tag::new(*key, WireType::Bit64))?
+                                    .add_value::<raw::Fixed64>(v)
+                            },
+                            UnknownField::LengthDelimited(v) => {
+                                builder
+                                    .add_tag(Tag::new(*key, WireType::LengthDelimited))?
+                                    .add_value::<raw::Bytes<_>>(v)
+                            },
+                            UnknownField::Group(v) => {
+                                builder
+                                    .add_tag(Tag::new(*key, WireType::StartGroup))?
+                                    .add_fields(v)?
+                                    .add_tag(Tag::new(*key, WireType::EndGroup))
+                            },
+                            UnknownField::Bit32(v) => {
+                                builder
+                                    .add_tag(Tag::new(*key, WireType::Bit32))?
+                                    .add_value::<raw::Fixed32>(v)
+                            }
+                        }
+                })
+            )
     }
-    fn write_to(&self, output: &mut CodedWriter) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result {
         for (key, values) in &self.inner {
             for value in values {
                 match value {
@@ -120,7 +124,7 @@ impl FieldSet for UnknownFieldSet {
     fn is_initialized(&self) -> bool { true }
 }
 impl UnknownFieldSet {
-    fn add_field_from(&mut self, input: &mut CodedReader) -> read::Result<()> {
+    fn add_field_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         if let Some(last_tag) = input.last_tag() {
             match last_tag.wire_type() {
                 WireType::Varint => self.push_value(last_tag.number(), UnknownField::Varint(input.read_varint64()?)),

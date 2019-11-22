@@ -1,18 +1,41 @@
 //! Defines the `CodedWriter`, a writer for writing protobuf encoded values to streams.
 
-use core::convert::TryInto;
 use core::fmt::{self, Display, Formatter};
-use core::mem;
-use core::ptr;
-use core::slice;
-use crate::collections;
+use core::mem::ManuallyDrop;
+use core::ptr::NonNull;
+use crate::collections::{RepeatedValue, FieldSet};
+use crate::internal::Sealed;
 use crate::io::{Length, stream::{self, Write}, Tag};
-use crate::raw;
-use either::{Either, Left, Right};
+use crate::raw::Value;
 use trapper::Wrapper;
 
 #[cfg(feature = "std")]
 use std::error;
+
+mod internal {
+    use core::marker::PhantomData;
+    use super::Any;
+
+    pub trait Writer {
+        fn into_any<'a>(&'a mut self) -> Any<'a>;
+        fn from_any<'a>(&'a mut self, any: Any<'a>);
+    }
+
+    pub struct FlatBuffer<'a> {
+        a: PhantomData<&'a mut [u8]>
+    }
+
+    impl Writer for FlatBuffer<'_> {
+        fn into_any<'a>(&'a mut self) -> Any<'a> {
+            unimplemented!()
+        }
+        fn from_any<'a>(&'a mut self, any: Any<'a>) {
+            unimplemented!()
+        }
+    }
+}
+
+use internal::Writer;
 
 /// The error type for [`CodedWriter`](struct.CodedWriter.html)
 #[derive(Debug)]
@@ -54,216 +77,96 @@ impl From<stream::Error> for Error {
 /// A result for a [`CodedWriter`](struct.CodedWriter.html) read operation
 pub type Result = core::result::Result<(), Error>;
 
-/// A coded input writer that writes to a borrowed [`Write`].
-/// 
-/// [`Write`]: https://doc.rust-lang.org/nightly/std/io/trait.Write.html
-pub struct CodedWriter<'a> {
-    inner: Either<&'a mut dyn Write, &'a mut [u8]>
+pub trait Output: Sealed {
+    type Writer: internal::Writer;
 }
 
-impl<'a> CodedWriter<'a> {
-    /// Creates a new [`CodedWriter`] over the borrowed [`Write`].
-    /// 
-    /// [`CodedWriter`]: struct.CodedWriter.html
-    /// [`Write`]: https://doc.rust-lang.org/nightly/std/io/trait.Write.html
-    #[inline]
-    pub fn with_write(inner: &'a mut dyn Write) -> Self {
-        Self { inner: Left(inner) }
+pub struct Slice<'a>(&'a mut [u8]);
+impl Sealed for Slice<'_> { }
+impl<'a> Output for Slice<'a> {
+    type Writer = internal::FlatBuffer<'a>;
+}
+
+pub struct Stream<T>(T);
+
+pub struct Any<'a> {
+    inner: Option<&'a mut dyn Write>
+}
+impl Sealed for Any<'_> { }
+impl<'a> Output for Any<'a> {
+    type Writer = Self;
+}
+impl internal::Writer for Any<'_> {
+    fn into_any<'a>(&'a mut self) -> Any<'a> {
+        Any { inner: self.inner.as_mut().map::<&'a mut dyn Write, _>(|v| &mut **v) }
     }
-    /// Creates a new [`CodedWriter`] over the borrowed [`slice`].
-    /// 
-    /// [`CodedWriter`]: struct.CodedWriter.html
-    /// [`slice`]: https://doc.rust-lang.org/nightly/std/primitive.slice.html
-    #[inline]
-    pub fn with_slice(inner: &'a mut [u8]) -> Self {
-        Self { inner: Right(inner) }
+    fn from_any<'a>(&'a mut self, _any: Any<'a>) { }
+}
+
+pub struct AnyConverter<'a, T: Output + 'a> {
+    src: NonNull<CodedWriter<T>>,
+    brdg: ManuallyDrop<CodedWriter<Any<'a>>>
+}
+
+impl<'a, T: Output> AnyConverter<'a, T> {
+    fn new(src: &'a mut CodedWriter<T>) -> Self {
+        Self {
+            src: unsafe { NonNull::new_unchecked(src) }, // don't use from since the borrow moves into the from call
+            brdg: ManuallyDrop::new(CodedWriter { inner: src.inner.into_any() })
+        }
+    }
+}
+
+impl<'a, T: Output> Drop for AnyConverter<'a, T> {
+    fn drop(&mut self) {
+        unsafe {
+            let src: &'a mut CodedWriter<T> = &mut *self.src.as_ptr();
+            src.inner.from_any(ManuallyDrop::take(&mut self.brdg).inner);
+        }
+    }
+}
+
+pub struct CodedWriter<T: Output> {
+    inner: T::Writer,
+}
+
+impl<T: Output> CodedWriter<T> {
+    pub fn as_any<'a>(&'a mut self) -> AnyConverter<'a, T> {
+        AnyConverter::new(self)
     }
 
-    /// Writes a tag to the output.
-    #[inline]
-    pub fn write_tag(&mut self, tag: Tag) -> Result {
-        self.write_value::<raw::Uint32>(&tag.get())
+    pub fn write_varint32(&mut self, value: u32) -> Result {
+        unimplemented!()
+    }
+    pub fn write_varint64(&mut self, value: u64) -> Result {
+        unimplemented!()
+    }
+    pub fn write_bit32(&mut self, value: u32) -> Result {
+        unimplemented!()
+    }
+    pub fn write_bit64(&mut self, value: u64) -> Result {
+        unimplemented!()
+    }
+    pub fn write_length_delimited(&mut self, value: &[u8]) -> Result {
+        unimplemented!()
     }
 
-    /// Writes a length to the output.
     #[inline]
     pub fn write_length(&mut self, length: Length) -> Result {
-        self.write_value::<raw::Uint32>(&(length.get() as u32))
+        self.write_varint32(length.get() as u32)
+    }
+    #[inline]
+    pub fn write_tag(&mut self, tag: Tag) -> Result {
+        self.write_varint32(tag.get())
     }
 
-    /// Writes a 32-bit varint to the output. This is the same as upcasting 
-    /// the value to a u64 and writing that, however this is more optimized 
-    /// for writing 32-bit values.
-    #[inline]
-    pub fn write_varint32(&mut self, mut value: u32) -> Result {
-        match self.inner {
-            Left(ref mut write) => {
-                let mut buf = [0u8; 5];
-                let mut i = 0;
-                loop {
-                    unsafe {
-                        *buf.get_unchecked_mut(i) = (value & 0x7F) as u8;
-                        value >>= 7;
-                        i += 1;
-                        if value == 0 {
-                            *buf.get_unchecked_mut(i - 1) |= 0x80;
-                            let part = buf.get_unchecked(0..i);
-                            write.write(part)?;
-                            return Ok(())
-                        }
-                    }
-                }
-            },
-            Right(ref mut buf) => {
-                if raw::raw_varint32_size(value).get() as usize > buf.len() {
-                    return Err(stream::Error.into());
-                }
-
-                let mut i = 0;
-                loop {
-                    unsafe {
-                        *buf.get_unchecked_mut(i) = (value & 0x7F) as u8;
-                        value >>= 7;
-                        i += 1;
-                        if value == 0 {
-                            *buf.get_unchecked_mut(i - 1) |= 0x80;
-                            *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(i), buf.len() - i);
-                            return Ok(())
-                        }
-                    }
-                }
-            }
-        }
+    pub fn write_value<V: Value + Wrapper>(&mut self, value: &V::Inner) -> Result {
+        V::wrap_ref(value).write_to(self)
     }
-
-    /// Writes a 64-bit varint to the output.
-    #[inline]
-    pub fn write_varint64(&mut self, mut value: u64) -> Result {
-        match self.inner {
-            Left(ref mut write) => {
-                let mut buf = [0u8; 10];
-                let mut i = 0;
-                loop {
-                    unsafe {
-                        *buf.get_unchecked_mut(i) = (value & 0x7F) as u8;
-                        value >>= 7;
-                        i += 1;
-                        if value == 0 {
-                            *buf.get_unchecked_mut(i - 1) |= 0x80;
-                            let part = buf.get_unchecked(0..i);
-                            write.write(part)?;
-                            return Ok(())
-                        }
-                    }
-                }
-            },
-            Right(ref mut buf) => {
-                if raw::raw_varint64_size(value).get() as usize > buf.len() {
-                    return Err(stream::Error.into());
-                }
-
-                let mut i = 0;
-                loop {
-                    unsafe {
-                        *buf.get_unchecked_mut(i) = (value & 0x7F) as u8;
-                        value >>= 7;
-                        i += 1;
-                        if value == 0 {
-                            *buf.get_unchecked_mut(i - 1) |= 0x80;
-                            *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(i), buf.len() - i);
-                            return Ok(())
-                        }
-                    }
-                }
-            }
-        }
+    pub fn write_values<U: RepeatedValue<V> + Wrapper, V>(&mut self, value: &U::Inner, tag: Tag) -> Result {
+        U::wrap_ref(value).write_to(self, tag)
     }
-
-    /// Writes a 32-bit little endian integer to the output.
-    #[inline]
-    pub fn write_bit32(&mut self, value: u32) -> Result {
-        let value = value.to_le_bytes();
-        const SIZE: usize = mem::size_of::<u32>();
-
-        match self.inner {
-            Left(ref mut i) => i.write(&value)?,
-            Right(ref mut buf) => {
-                if buf.len() < SIZE {
-                    return Err(stream::Error.into());
-                } else {
-                    unsafe {
-                        ptr::copy_nonoverlapping(value.as_ptr(), buf.as_mut_ptr(), SIZE);
-                        *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(SIZE), buf.len() - SIZE);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Writes a 64-bit little endian integer to the output.
-    #[inline]
-    pub fn write_bit64(&mut self, value: u64) -> Result {
-        let value = value.to_le_bytes();
-        const SIZE: usize = mem::size_of::<u64>();
-        match self.inner {
-            Left(ref mut i) => i.write(&value)?,
-            Right(ref mut buf) => {
-                if buf.len() >= SIZE {
-                    unsafe {
-                        ptr::copy_nonoverlapping(value.as_ptr(), buf.as_mut_ptr(), SIZE);
-                        *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(SIZE), buf.len() - SIZE);
-                    }
-                } else {
-                    return Err(stream::Error.into());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Writes raw bytes to the output. This should be used carefully as to not corrupt the coded output.
-    #[inline]
-    pub fn write_bytes(&mut self, value: &[u8]) -> Result {
-        match &mut self.inner {
-            Left(writer) => writer.write(value)?,
-            Right(buf) => {
-                if value.len() <= buf.len() {
-                    unsafe {
-                        ptr::copy_nonoverlapping(value.as_ptr(), buf.as_mut_ptr(), value.len());
-                        *buf = slice::from_raw_parts_mut(buf.as_mut_ptr().add(value.len()), buf.len() - value.len());
-                    }
-                } else {
-                    return Err(stream::Error.into());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Writes a length delimited set of bytes to the output.
-    #[inline]
-    pub fn write_length_delimited(&mut self, value: &[u8]) -> Result {
-        let len: i32 = value.len().try_into().map_err(|_| Error::ValueTooLarge)?;
-        self.write_length(Length(len))?;
-        self.write_bytes(value)
-    }
-
-    /// Writes a generic value to the output.
-    #[inline]
-    pub fn write_value<T: raw::Value + Wrapper>(&mut self, value: &T::Inner) -> Result {
-        T::wrap_ref(value).write_to(self)
-    }
-
-    /// Writes a collection of values to the output.
-    #[inline]
-    pub fn write_values<T>(&mut self, value: &impl collections::RepeatedValue<T>, tag: Tag) -> Result {
-        value.write_to(self, tag)
-    }
-
-    /// Writes a collection of fields to the output.
-    #[inline]
-    pub fn write_fields(&mut self, value: &impl crate::FieldSet) -> Result {
+    pub fn write_fields<U: FieldSet>(&mut self, value: &U) -> Result {
         value.write_to(self)
     }
 }

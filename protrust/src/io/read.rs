@@ -1,18 +1,256 @@
 //! Defines the `CodedReader`, a reader for reading values from a protobuf encoded byte stream.
 
-use alloc::boxed::Box;
 use alloc::string::FromUtf8Error;
-use alloc::vec::Vec;
-use core::cmp;
+use core::convert::TryFrom;
 use core::fmt::{self, Display, Formatter};
-use crate::collections;
-use crate::io::{Tag, Length, WireType, ByteString, stream::{self, Read}};
-use crate::raw;
-use either::{Either, Left, Right};
+use core::mem::ManuallyDrop;
+use core::num::{NonZeroU32, NonZeroUsize};
+use core::ops;
+use core::ptr::NonNull;
+use core::result;
+use crate::collections::{RepeatedValue, FieldSet, TryRead};
+use crate::internal::Sealed;
+use crate::io::{Tag, WireType, Length, ByteString, stream::{self, Read}};
+use crate::raw::{self, Value};
 use trapper::Wrapper;
 
 #[cfg(feature = "std")]
 use std::error;
+
+const DEFAULT_BUF_SIZE: usize = 8 * 1024;
+
+mod internal {
+    use alloc::boxed::Box;
+    use core::marker::PhantomData;
+    use core::num::NonZeroU32;
+    use core::ptr::NonNull;
+    use core::result;
+    use core::slice;
+    use crate::io::{Tag, Length, ByteString, stream::{self, Read}, read::{Result, Any}};
+
+    pub trait Array: AsRef<[u8]> {
+        const LENGTH: usize;
+    }
+
+    macro_rules! fva {
+        ($($len:literal),*) => {
+            $(
+                impl Array for [u8; $len] {
+                    const LENGTH: usize = $len;
+                }
+            )*
+        };
+    }
+
+    fva!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+
+    pub trait Reader {
+        fn push_limit(&mut self, limit: Length) -> result::Result<Option<Length>, stream::Error>;
+        fn pop_limit(&mut self, old: Option<Length>);
+        fn reached_limit(&self) -> bool;
+
+        fn read_tag(&mut self) -> Result<Option<u32>>;
+        fn read_varint32(&mut self) -> Result<u32>;
+        fn read_varint64(&mut self) -> Result<u64>;
+        fn read_bit32(&mut self) -> Result<u32>;
+        fn read_bit64(&mut self) -> Result<u64>;
+        fn read_length_delimited<B: ByteString>(&mut self) -> Result<B>;
+
+        fn skip_varint(&mut self) -> Result<()>;
+        fn skip_bit32(&mut self) -> Result<()>;
+        fn skip_bit64(&mut self) -> Result<()>;
+        fn skip_length_delimited(&mut self) -> Result<()>;
+
+        fn into_any<'a>(&'a mut self) -> Any<'a>;
+        fn from_any<'a>(&'a mut self, any: Any<'a>);
+    }
+
+    pub struct FlatBuffer<'a> {
+        pub a: PhantomData<&'a [u8]>,
+        pub start: *const u8,
+        pub limit: *const u8,
+        pub end: *const u8
+    }
+
+    impl<'a> FlatBuffer<'a> {
+        pub fn new(value: &'a [u8]) -> Self {
+            let end = unsafe { value.as_ptr().add(value.len()) };
+            FlatBuffer {
+                a: PhantomData,
+                start: value.as_ptr(),
+                end,
+                limit: end
+            }
+        }
+        pub fn is_empty_limited(&self) -> bool {
+            self.start >= self.limit
+        }
+        pub fn len_limited(&self) -> usize {
+            usize::wrapping_sub(self.limit as _, self.start as _)
+        }
+        pub fn len(&self) -> usize {
+            usize::wrapping_sub(self.end as _, self.start as _)
+        }
+        pub fn try_limited_as_array<A: Array>(&self) -> Option<&'a A> {
+            if self.len_limited() >= A::LENGTH {
+                unsafe { Some(&*(self.start as *const A)) }
+            } else {
+                None
+            }
+        }
+        pub fn try_as_array<A: Array>(&self) -> Option<&'a A> {
+            if self.len() >= A::LENGTH {
+                unsafe { Some(&*(self.start as *const A)) }
+            } else {
+                None
+            }
+        }
+        pub unsafe fn copy_limited_into(&self, slice: &mut [u8]) {
+            debug_assert!(self.len_limited() >= slice.len());
+
+            core::ptr::copy_nonoverlapping(self.start, slice.as_mut_ptr(), slice.len());
+        }
+        pub unsafe fn advance(&mut self, amnt: usize) {
+            let new_pos = self.start.add(amnt);
+
+            debug_assert!(new_pos < self.limit, "advanced past end of limit");
+            debug_assert!(new_pos < self.end, "advanced past end of buffer");
+
+            self.start = new_pos;
+        }
+        pub fn as_limited_slice(&self) -> &'a [u8] {
+            unsafe { slice::from_raw_parts(self.start, self.len_limited()) }
+        }
+    }
+
+    impl Reader for FlatBuffer<'_> {
+        fn push_limit(&mut self, limit: Length) -> result::Result<Option<Length>, stream::Error> {
+            unimplemented!()
+        }
+        fn pop_limit(&mut self, old: Option<Length>) {
+            unimplemented!()
+        }
+        fn reached_limit(&self) -> bool {
+            unimplemented!()
+        }
+
+        fn read_tag(&mut self) -> Result<Option<u32>> {
+            unimplemented!()
+        }
+        fn read_varint32(&mut self) -> Result<u32> {
+            unimplemented!()
+        }
+        fn read_varint64(&mut self) -> Result<u64> {
+            unimplemented!()
+        }
+        fn read_bit32(&mut self) -> Result<u32> {
+            unimplemented!()
+        }
+        fn read_bit64(&mut self) -> Result<u64> {
+            unimplemented!()
+        }
+        fn read_length_delimited<B: ByteString>(&mut self) -> Result<B> {
+            unimplemented!()
+        }
+
+        fn skip_varint(&mut self) -> Result<()> {
+            unimplemented!()
+        }
+        fn skip_bit32(&mut self) -> Result<()> {
+            unimplemented!()
+        }
+        fn skip_bit64(&mut self) -> Result<()> {
+            unimplemented!()
+        }
+        fn skip_length_delimited(&mut self) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn into_any<'a>(&'a mut self) -> Any<'a> {
+            unimplemented!()
+        }
+        fn from_any<'a>(&'a mut self, any: Any<'a>) {
+            unimplemented!()
+        }
+    }
+
+    pub struct StreamBuffer<T> {
+        input: T,
+        buf: Box<[u8]>,
+        start: Option<NonNull<u8>>,
+        limit: Option<NonNull<u8>>,
+    }
+
+    impl<T> StreamBuffer<T> {
+        pub fn new(input: T, cap: usize) -> Self {
+            unimplemented!()
+        }
+    }
+
+    impl<T: Read> Reader for StreamBuffer<T> {
+        fn push_limit(&mut self, limit: Length) -> result::Result<Option<Length>, stream::Error> {
+            unimplemented!()
+        }
+        fn pop_limit(&mut self, old: Option<Length>) {
+            unimplemented!()
+        }
+        fn reached_limit(&self) -> bool {
+            unimplemented!()
+        }
+
+        fn read_tag(&mut self) -> Result<Option<u32>> {
+            unimplemented!()
+        }
+        fn read_varint32(&mut self) -> Result<u32> {
+            unimplemented!()
+        }
+        fn read_varint64(&mut self) -> Result<u64> {
+            unimplemented!()
+        }
+        fn read_bit32(&mut self) -> Result<u32> {
+            unimplemented!()
+        }
+        fn read_bit64(&mut self) -> Result<u64> {
+            unimplemented!()
+        }
+        fn read_length_delimited<B: ByteString>(&mut self) -> Result<B> {
+            unimplemented!()
+        }
+
+        fn skip_varint(&mut self) -> Result<()> {
+            unimplemented!()
+        }
+        fn skip_bit32(&mut self) -> Result<()> {
+            unimplemented!()
+        }
+        fn skip_bit64(&mut self) -> Result<()> {
+            unimplemented!()
+        }
+        fn skip_length_delimited(&mut self) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn into_any<'a>(&'a mut self) -> Any<'a> {
+            unimplemented!()
+        }
+        fn from_any<'a>(&'a mut self, any: Any<'a>) {
+            unimplemented!()
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::{FlatBuffer, StreamBuffer};
+
+        #[test]
+        fn flat_buffer() {
+            let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+            let mut buf = FlatBuffer::new(&data);
+        }
+    }
+}
+
+use internal::Reader;
 
 /// The error type for [`CodedReader`](struct.CodedReader.html)
 #[derive(Debug)]
@@ -65,7 +303,29 @@ impl error::Error for Error {
 }
 
 /// A result for a [`CodedReader`](struct.CodedReader.html) read operation
-pub type Result<T> = core::result::Result<T, Error>;
+pub type Result<T> = result::Result<T, Error>;
+
+/// An input type that can be used to create a `Reader` for a [`CodedReader`] instance.
+/// 
+/// [`CodedReader`]: struct.CodedReader.html
+pub trait Input: Sealed {
+    /// The reader type used by the [`CodedReader`](struct.CodedReader.html) to read data
+    type Reader: internal::Reader;
+}
+
+/// A type used for a [`CodedReader`] reading from a [`slice`] input.
+pub struct Slice<'a>(&'a [u8]);
+impl Sealed for Slice<'_> { }
+impl<'a> Input for Slice<'a> {
+    type Reader = internal::FlatBuffer<'a>;
+}
+
+/// A type used for a [`CodedReader`] reading from a [`Read`] input. This input type buffers the stream's data.
+pub struct Stream<T>(T);
+impl<T> Sealed for Stream<T> { }
+impl<T: Read> Input for Stream<T> {
+    type Reader = internal::StreamBuffer<T>;
+}
 
 #[derive(Clone, Debug)]
 struct ReaderOptions {
@@ -110,13 +370,12 @@ impl Builder {
     /// let mut reader =
     ///     ReaderBuilder::new()
     ///         .skip_unknown_fields(true)
-    ///         .with_slice(&data);
+    ///         .with_buffer(&data);
     /// ```
     #[inline]
-    pub fn with_slice<'a>(&self, inner: &'a [u8]) -> CodedReader<'a> {
+    pub fn with_slice<'a>(&self, inner: &'a [u8]) -> CodedReader<Slice<'a>> {
         CodedReader {
-            inner: Right(Cursor::new(inner)),
-            limit: None,
+            inner: internal::FlatBuffer::new(inner),
             last_tag: None,
             options: self.options.clone()
         }
@@ -136,7 +395,7 @@ impl Builder {
     ///         .with_slice(&data);
     /// ```
     #[inline]
-    pub fn with_read<'a>(&self, inner: &'a mut dyn Read) -> CodedReader<'a> {
+    pub fn with_stream<T: Read>(&self, inner: T) -> CodedReader<Stream<T>> {
         self.with_capacity(DEFAULT_BUF_SIZE, inner)
     }
     /// Constructs a [`CodedReader`](struct.CodedReader.html) using this builder and
@@ -154,141 +413,283 @@ impl Builder {
     ///         .with_slice(&data);
     /// ```
     #[inline]
-    pub fn with_capacity<'a>(&self, capacity: usize, inner: &'a mut dyn Read) -> CodedReader<'a> {
+    pub fn with_capacity<T: Read>(&self, capacity: usize, inner: T) -> CodedReader<Stream<T>> {
         CodedReader {
-            inner: Left(ReadWithBuffer::new(inner, capacity)),
-            limit: None,
+            inner: internal::StreamBuffer::new(inner, capacity),
             last_tag: None,
             options: self.options.clone()
         }
     }
 }
 
-const DEFAULT_BUF_SIZE: usize = 8 * 1024;
+/// Represents any input type for a CodedReader. This is slower than a
+/// generic stream input or slice, but is more flexible and can be used 
+/// in cases where the input or message type is unknown.
+pub struct Any<'a> {
+    input: Option<&'a mut dyn Read>,
+    buf: Option<&'a mut [u8]>,
+    /// Values < 0 indicate no limit
+    remaining_limit: isize,
 
-struct ReadWithBuffer<'a> {
-    inner: &'a mut dyn Read,
-    buf: Box<[u8]>,
-    cap: usize,
-    pos: usize
+    start: NonNull<u8>,
+    /// With no limit, this is equal to end
+    limit: NonNull<u8>,
+    end: NonNull<u8>,
 }
 
-impl<'a> ReadWithBuffer<'a> {
+impl Any<'_> {
+    fn reached_end(&self) -> bool {
+        self.start > self.end
+    }
+    fn reached_limit(&self) -> bool {
+        self.remaining_limit >= 0 && self.start > self.limit
+    }
     #[inline]
-    fn new(inner: &'a mut dyn Read, cap: usize) -> ReadWithBuffer<'a> {
-        let buf = unsafe {
-            let mut buf = Vec::with_capacity(cap);
-            buf.set_len(cap);
-            buf.into_boxed_slice()
-        };
-        ReadWithBuffer { inner, buf, cap: 0, pos: 0 }
-    }
-    fn buffer(&self) -> &[u8] {
-        &self.buf[self.pos..self.cap]
-    }
-    fn consume(&mut self, len: i32) {
-        self.pos += len as usize;
-        if self.pos >= self.cap {
-            self.pos = 0;
-            self.cap = 0;
-        }
-    }
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
-        let buffer = self.buffer();
-        if buffer.len() >= buf.len() {
-            buf.copy_from_slice(&buffer[..buf.len()]);
+    fn next_byte(&self) -> Option<u8> {
+        if !self.reached_limit() {
+            unsafe { Some(*self.start.as_ptr()) }
         } else {
-            let (copyable, mut remainder) = buf.split_at_mut(buffer.len());
-            copyable.copy_from_slice(buffer);
-            while !remainder.is_empty() {
-                let amnt = self.inner.read(remainder)?;
-                if amnt == 0 {
-                    return Err(stream::Error.into());
-                }
-                remainder = &mut remainder[amnt..];
-            }
+            None
         }
-
-        Ok(())
-    }
-}
-
-struct Cursor<'a> {
-    buf: &'a [u8],
-    pos: usize
-}
-
-impl<'a> Cursor<'a> {
-    #[inline]
-    fn new(buf: &'a [u8]) -> Cursor<'a> {
-        Cursor { buf, pos: 0 }
     }
     #[inline]
-    fn get(&self) -> &[u8] {
-        unsafe { self.buf.get_unchecked(self.pos..) }
+    fn try_read_byte(&mut self) -> Option<u8> {
+        if !self.reached_limit() {
+            let result = unsafe { Some(*self.start.as_ptr()) };
+            self.advance(1);
+            result
+        } else {
+            None
+        }
     }
     #[inline]
-    fn consume(&mut self, amnt: i32) {
-        debug_assert!(self.pos + amnt as usize <= self.buf.len());
+    fn read_byte(&mut self) -> Result<u8> {
+        if !self.reached_limit() {
+            let result = unsafe { Ok(*self.start.as_ptr()) };
+            self.advance(1);
+            result
+        } else {
+            unimplemented!()
+        }
+    }
+    fn is_stream(&self) -> bool {
+        self.input.is_some()
+    }
+    fn len(&self) -> usize {
+        usize::wrapping_sub(self.limit.as_ptr() as _, self.start.as_ptr() as _)
+    }
+    fn refresh(&mut self) -> Result<Option<NonZeroUsize>> {
+        match (&mut self.input, &mut self.buf) {
+            (Some(input), Some(buf)) => 
+                input.read(buf)
+                    .map(NonZeroUsize::new)
+                    .map_err(Into::into),
+            _ => Ok(None)
+        }
+    }
 
-        self.pos += amnt as usize;
+    fn advance(&mut self, amnt: usize) {
+        unsafe {
+            NonNull::new_unchecked(self.start.as_ptr().add(amnt));
+        }
     }
 }
 
-#[inline]
-fn apply_limit(buf: &[u8], limit: Option<i32>) -> &[u8] {
-    if let Some(limit) = limit {
-        &buf[..cmp::min(buf.len(), limit as usize)]
-    } else {
-        buf
+impl Sealed for Any<'_> { }
+impl Input for Any<'_> {
+    type Reader = Self;
+}
+impl internal::Reader for Any<'_> {
+    fn push_limit(&mut self, limit: Length) -> result::Result<Option<Length>, stream::Error> {
+        unimplemented!()
     }
-}
+    fn pop_limit(&mut self, old: Option<Length>) {
+        unimplemented!()
+    }
+    fn reached_limit(&self) -> bool {
+        unimplemented!()
+    }
 
-trait FixedVarintArray: AsRef<[u8]> {
-    const LENGTH: usize;
-}
-
-macro_rules! fva {
-    ($($len:literal),*) => {
-        $(
-            impl FixedVarintArray for [u8; $len] {
-                const LENGTH: usize = $len;
+    #[inline]
+    fn read_tag(&mut self) -> Result<Option<u32>> {
+        if self.reached_limit() {
+            Ok(None)
+        } else
+        if !self.reached_limit() && self.reached_end() {
+            match self.refresh()? {
+                None => Ok(None),
+                _ => self.read_varint32().map(Some)
             }
-        )*
-    };
+        } else {
+            self.read_varint32().map(Some)
+        }
+    }
+    fn read_varint32(&mut self) -> Result<u32> {
+        unimplemented!()
+    }
+    fn read_varint64(&mut self) -> Result<u64> {
+        unimplemented!()
+    }
+    fn read_bit32(&mut self) -> Result<u32> {
+        unimplemented!()
+    }
+    fn read_bit64(&mut self) -> Result<u64> {
+        unimplemented!()
+    }
+    fn read_length_delimited<B: ByteString>(&mut self) -> Result<B> {
+        unimplemented!()
+    }
+
+    fn skip_varint(&mut self) -> Result<()> {
+        unimplemented!()
+    }
+    fn skip_bit32(&mut self) -> Result<()> {
+        unimplemented!()
+    }
+    fn skip_bit64(&mut self) -> Result<()> {
+        unimplemented!()
+    }
+    fn skip_length_delimited(&mut self) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn into_any<'a>(&'a mut self) -> Any<'a> {
+        let reborrowed_input = self.input.as_mut().map::<&'a mut dyn Read, _>(|v| &mut **v);
+        let reborrowed_buf = self.buf.as_mut().map::<&'a mut [u8], _>(|v| &mut **v);
+
+        Any {
+            input: reborrowed_input,
+            buf: reborrowed_buf,
+            remaining_limit: self.remaining_limit,
+            start: self.start,
+            limit: self.limit,
+            end: self.end
+        }
+    }
+    fn from_any<'a>(&'a mut self, any: Any<'a>) {
+        self.remaining_limit = any.remaining_limit;
+        self.start = any.start;
+        self.limit = any.limit;
+        self.end = any.end;
+    }
 }
 
-fva!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+unsafe impl Send for Any<'_> { }
+unsafe impl Sync for Any<'_> { }
 
-/// A coded input reader that reads from a borrowed [`BufRead`].
+/// Provides a bridge for a generic [`CodedReader`] to be converted
+/// to a [`CodedReader`]`<`[`Any`]`>` and vice versa.
 /// 
-/// [`BufRead`]: https://doc.rust-lang.org/nightly/std/io/trait.BufRead.html
-pub struct CodedReader<'a> {
-    inner: Either<ReadWithBuffer<'a>, Cursor<'a>>,
-    limit: Option<i32>,
+/// This allows certain code to bridge gaps where not all merge functions
+/// can be generic over an input like extension or reflection contexts.
+/// 
+/// [`CodedReader`]: struct.CodedReader.html
+/// [`Any`]: struct.Any.html
+pub struct AnyConverter<'a, T: Input + 'a> {
+    src: NonNull<CodedReader<T>>,
+    brdg: ManuallyDrop<CodedReader<Any<'a>>>
+}
+
+impl<'a, T: Input> AnyConverter<'a, T> {
+    fn new(src: &'a mut CodedReader<T>) -> Self {
+        let src_ptr = unsafe { NonNull::new_unchecked(src) }; // don't use from since the borrow moves into the from call
+        let brdg = 
+            CodedReader {
+                inner: src.inner.into_any(),
+                last_tag: src.last_tag,
+                options: src.options.clone()
+            };
+        Self {
+            src: src_ptr,
+            brdg: ManuallyDrop::new(brdg)
+        }
+    }
+}
+
+impl<'a, T: Input> ops::Deref for AnyConverter<'a, T> {
+    type Target = CodedReader<Any<'a>>;
+
+    fn deref(&self) -> &CodedReader<Any<'a>> {
+        &self.brdg
+    }
+}
+
+impl<'a, T: Input> ops::DerefMut for AnyConverter<'a, T> {
+    fn deref_mut(&mut self) -> &mut CodedReader<Any<'a>> {
+        &mut self.brdg
+    }
+}
+
+impl<'a, T: Input> Drop for AnyConverter<'a, T> {
+    fn drop(&mut self) {
+        unsafe {
+            let src: &'a mut CodedReader<T> = &mut *self.src.as_ptr();
+
+            src.last_tag = self.brdg.last_tag;
+            src.inner.from_any(ManuallyDrop::take(&mut self.brdg).inner);
+        }
+    }
+}
+
+/// A reader used by generated code to quickly parse field values without tag
+/// wire type and field number checking.
+/// 
+/// This structure defers tag checking, making it faster to read fields when matching
+/// on an existing field tag value.
+pub struct FieldReader<'a, T: Input + 'a> {
+    inner: &'a mut CodedReader<T>,
+    tag: u32,
+}
+
+impl<'a, T: Input + 'a> FieldReader<'a, T> {
+    #[inline]
+    pub fn tag(&self) -> u32 {
+        self.tag
+    }
+    #[inline]
+    pub fn read_value<F: FnOnce(&'a mut CodedReader<T>) -> Result<()>>(self, tag: Tag, f: F) -> Result<()> {
+        debug_assert_eq!(self.tag, tag.get(), "Provided tag does not match read tag value");
+        self.inner.last_tag = Some(tag);
+
+        f(self.inner)
+    }
+
+    #[inline]
+    pub fn check_and_read_value<F: FnOnce(&'a mut CodedReader<T>) -> Result<()>>(self, f: F) -> Result<()> {
+        let tag = Tag::try_from(self.tag).map_err(|_| Error::InvalidTag(self.tag))?;
+        self.inner.last_tag = Some(tag);
+
+        f(self.inner)
+    }
+}
+
+/// A coded input reader that reads from a specified input.
+pub struct CodedReader<T: Input> {
+    inner: T::Reader,
     last_tag: Option<Tag>,
     options: ReaderOptions,
 }
 
-impl<'a> CodedReader<'a> {
+impl<T: Read> CodedReader<Stream<T>> {
     /// Creates a new [`CodedReader`] in the default configuration
-    ///  over the borrowed [`Read`] with the default buffer capacity.
+    /// over the specified [`Read`] with the default buffer capacity.
     /// 
     /// [`CodedReader`]: struct.CodedReader.html
     /// [`Read`]: https://doc.rust-lang.org/nightly/std/io/trait.Read.html
-    #[inline]
-    pub fn with_read(inner: &'a mut dyn Read) -> Self {
-        Builder::new().with_read(inner)
+    pub fn with_stream(inner: T) -> Self {
+        Builder::new().with_stream(inner)
     }
     /// Creates a new [`CodedReader`] in the default configuration
-    /// over the borrowed [`Read`] with the specified buffer capacity.
+    /// over the specified [`Read`] with the specified buffer capacity.
     /// 
     /// [`CodedReader`]: struct.CodedReader.html
     /// [`Read`]: streams/trait.Read.html
-    #[inline]
-    pub fn with_capacity(capacity: usize, inner: &'a mut dyn Read) -> Self {
+    pub fn with_capacity(capacity: usize, inner: T) -> Self {
         Builder::new().with_capacity(capacity, inner)
     }
+}
+
+impl<'a> CodedReader<Slice<'a>> {
     /// Creates a new [`CodedReader`] over the borrowed [`slice`]
     /// in the default configuration. This is optimized to read directly
     /// from the slice, making it faster than reading from a [`Read`] object.
@@ -296,225 +697,127 @@ impl<'a> CodedReader<'a> {
     /// [`CodedReader`]: struct.CodedReader.html
     /// [`slice`]: https://doc.rust-lang.org/nightly/std/primitive.slice.html
     /// [`Read`]: streams/trait.Read.html
-    #[inline]
     pub fn with_slice(inner: &'a [u8]) -> Self {
         Builder::new().with_slice(inner)
     }
+}
 
-    #[inline]
-    fn consume_limit(&mut self, len: i32) {
-        if let Some(limit) = self.limit.as_mut() {
-            *limit -= len;
-        }
-    }
-
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
-        match self.inner {
-            Left(ref mut read) => {
-                read.read_exact(buf)?;
-                read.consume(buf.len() as i32);
-            },
-            Right(ref mut curs) => {
-                let slice = 
-                    apply_limit(curs.get(), self.limit)
-                        .get(..buf.len())
-                        .ok_or(Error::from(stream::Error))?;
-                buf.copy_from_slice(slice);
-                curs.consume(buf.len() as i32);
-            }
-        }
-        self.consume_limit(buf.len() as i32);
-        Ok(())
-    }
-
-    /// Returns if unknown field sets should skip any unknown fields when merging
-    #[inline]
+impl<T: Input> CodedReader<T> {
     pub fn skip_unknown_fields(&self) -> bool {
         self.options.skip_unknown_fields
     }
-
-    /// Gets the last tag read from the input.
-    #[inline]
     pub fn last_tag(&self) -> Option<Tag> {
         self.last_tag
     }
-
-    /// Reads a length delimited value's length from the input.
-    /// This returns [`InputError::NegativeSize`](enum.InputError.html#variant.NegativeSize) if the length is invalid.
-    #[inline]
-    pub fn read_length(&mut self) -> Result<Length> {
-        let value = self.read_value::<raw::Int32>()?;
-        Length::new(value).ok_or(Error::NegativeSize)
+    pub fn as_any<'a>(&'a mut self) -> AnyConverter<'a, T> {
+        AnyConverter::new(self)
     }
 
-    /// Reads a length from the input and pushes it, returning the old length to return when the input has reached it's limit.
-    /// If an error occurs while reading the length, this does not push a length.
-    #[inline]
-    pub fn read_and_push_length(&mut self) -> Result<Option<Length>> {
-        let length = self.read_length()?;
-        Ok(self.push_length(length))
-    }
-
-    /// Pushes a new length to the reader, limiting the amount of data read from the input by the 
-    /// specified amount.
-    #[inline]
-    pub fn push_length(&mut self, length: Length) -> Option<Length> {
-        core::mem::replace(&mut self.limit, Some(length.get())).map(Length)
-    }
-
-    /// Returns an old length to the reader.
+    /// Reads a length value from the input.
     /// 
-    /// This should only be used after the current length has been read to completion. Using this 
-    /// before doing so can cause odd behavior.
-    #[inline]
-    pub fn pop_length(&mut self, old: Option<Length>) {
-        self.limit = old.map(Length::get)
+    /// # Errors
+    /// 
+    /// If a negative length is read, this returns a `NegativeSize` error.
+    pub fn read_limit(&mut self) -> Result<Length> {
+        self.read_value::<raw::Int32>().and_then(|i| Length::new(i).ok_or(Error::NegativeSize))
     }
-
-    /// Returns if the length's limit has been reached. The returned value of this is unknown if it's 
-    /// called when no length has been pushed.
-    #[inline]
+    /// Pushes a new limit to the reader.
+    /// 
+    /// The previous limit returned by this function must be returned back to the input 
+    /// via [`pop_limit`](#method.pop_limit). Failure to do so may pre-emptively end the stream.
+    /// 
+    /// # Errors
+    /// 
+    /// Certain inputs will perform a check and return a [`stream::Error`](../stream/struct.Error.html)
+    /// if a limit extends beyond the end of the input.
+    pub fn push_limit(&mut self, limit: Length) -> result::Result<Option<Length>, stream::Error> {
+        self.inner.push_limit(limit)
+    }
+    /// Pops the last limit off the stack for the reader. The consumer must return the previous limit returned by [`push_limit`](#method.push_limit).
+    /// 
+    /// # Safety
+    /// 
+    /// This must be the limit previously last returned by [`push_limit`](#method.push_limit). Any other values are undefined behavior.
+    pub unsafe fn pop_limit(&mut self, old_limit: Option<Length>) {
+        self.inner.pop_limit(old_limit)
+    }
+    /// Returns whether this coded reader has reached the current length limit
     pub fn reached_limit(&self) -> bool {
-        self.limit == Some(0)
+        self.inner.reached_limit()
     }
 
-    /// Reads a tag from the input, returning none if there is no more data available in the input.
-    #[inline]
+    /// Reads a field tag from the input
     pub fn read_tag(&mut self) -> Result<Option<Tag>> {
-        unimplemented!()
+        self.last_tag = 
+            self.inner.read_tag()?
+                .map(|v| Tag::try_from(v).map_err(|_| Error::InvalidTag(v)))
+                .transpose()?;
+        Ok(self.last_tag)
     }
-
-    /// Reads a 32-bit varint from the input. This is optimized for 32-bit varint values and will discard 
-    /// the top 32 bits of a 64-bit varint value.
-    #[inline]
+    /// Reads a 32-bit varint field value. This is funactionally similar to [`read_varint64`](#method.read_varint64),
+    /// but is optimised for 32-bit values and will discard any top bits from 64-bit values.
     pub fn read_varint32(&mut self) -> Result<u32> {
-        let mut buf = [0u8; 1];
-        let mut value = 0u32;
-        for i in 0..5 {
-            self.read_exact(&mut buf)?;
-            let b = buf[0] as u32;
-            value |= (b & 0x7F) << (7 * i);
-            if b >= 0x80 {
-                return Ok(value);
-            }
-        }
-        for _ in 0..5 {
-            self.read_exact(&mut buf)?;
-            let b = buf[0] as u32;
-            if b >= 0x80 {
-                return Ok(value);
-            }
-        }
-        Err(Error::MalformedVarint)
+        self.inner.read_varint32()
     }
-
-    /// Reads a 64-bit varint from the input.
-    #[inline]
+    /// Reads a 64-bit varint field value.
     pub fn read_varint64(&mut self) -> Result<u64> {
-        let mut buf = [0u8; 1];
-        let mut value = 0u64;
-        for i in 0..10 {
-            self.read_exact(&mut buf)?;
-            let b = buf[0] as u64;
-            value |= (b & 0x7F) << (7 * i);
-            if b >= 0x80 {
-                return Ok(value);
-            }
-        }
-        Err(Error::MalformedVarint)
+        self.inner.read_varint64()
     }
-
-    fn read_varint32_direct<T: FixedVarintArray>(arr: &T) -> u32 {
-        let mut value = 0u32;
-        let arr = arr.as_ref();
-        for i in 0..cmp::min(T::LENGTH, 5) {
-            value |= ((arr[i] as u32) & 0x7F) << (7 * i);
-        }
-        value
-    }
-
-    fn read_varint64_direct<T: FixedVarintArray>(arr: &T) -> u64 {
-        let mut value = 0u64;
-        let arr = arr.as_ref();
-        for i in 0..T::LENGTH {
-            value |= ((arr[i] as u64) & 0x7F) << (7 * i);
-        }
-        value
-    }
-
-    /// Reads a 32-bit little endian value from the input
-    #[inline]
+    /// Reads a 4-byte little endian value
     pub fn read_bit32(&mut self) -> Result<u32> {
-        let mut buf = [0u8; 4];
-        self.read_exact(&mut buf)?;
-        Ok(u32::from_le_bytes(buf))
+        self.inner.read_bit32()
     }
-
-    /// Reads a 64-bit little endian value from the input
-    #[inline]
+    /// Reads a 8-byte little endian value
     pub fn read_bit64(&mut self) -> Result<u64> {
-        let mut buf = [0u8; 8];
-        self.read_exact(&mut buf)?;
-        Ok(u64::from_le_bytes(buf))
+        self.inner.read_bit64()
     }
-
-    /// Reads a length delimited value from the input prefixed by a length
-    #[inline]
-    pub fn read_length_delimited<T: ByteString>(&mut self) -> Result<T> {
-        let length = self.read_length()?.get();
-        let mut value = T::new(length as usize);
-        debug_assert!(value.as_ref().len() == length as usize);
-
-        self.read_exact(value.as_mut())?;
-        Ok(value)
+    /// Reads a length delimited string of bytes.
+    pub fn read_length_delimited<B: ByteString>(&mut self) -> Result<B> {
+        self.inner.read_length_delimited()
     }
-
-    #[inline]
-    /// Skips the last value based on the tag read from the input. If no tag has been read, this does nothing
+    /// Skips the last field read from the input
     pub fn skip(&mut self) -> Result<()> {
-        if let Some(tag) = self.last_tag {
-            match tag.wire_type() {
-                WireType::Varint => { self.read_varint64()?; },
-                WireType::Bit64 => { self.read_bit64()?; },
-                WireType::LengthDelimited => { self.read_length_delimited::<Box<_>>()?; },
+        if let Some(last_tag) = self.last_tag() {
+            match last_tag.wire_type() {
+                WireType::Varint => self.inner.skip_varint()?,
+                WireType::Bit64 => self.inner.skip_bit64()?,
+                WireType::LengthDelimited => self.inner.skip_length_delimited()?,
                 WireType::StartGroup => {
-                    let end_tag = Tag::new(tag.number(), WireType::EndGroup);
-                    while let Some(tag) = self.read_tag()? {
-                        if tag != end_tag {
-                            self.skip()?;
-                        } else {
-                            break;
+                    let end = Tag::new(last_tag.number(), WireType::EndGroup);
+                    loop {
+                        match self.read_tag()? {
+                            Some(tag) if tag == end => break,
+                            Some(_) => self.skip()?,
+                            None => return Err(Error::StreamError(stream::Error))
                         }
                     }
                 },
                 WireType::EndGroup => { },
-                WireType::Bit32 => { self.read_bit64()?; }
+                WireType::Bit32 => self.inner.skip_bit32()?,
             }
         }
+
         Ok(())
     }
 
-    /// Reads an instance of the specified value
     #[inline]
-    pub fn read_value<T: raw::Value + Wrapper>(&mut self) -> Result<T::Inner> {
-        T::read_new(self).map(T::unwrap)
+    pub fn read_field<'a>(&'a mut self) -> Result<Option<FieldReader<'a, T>>> {
+        self.inner.read_tag().map(move |t| t.map(move |t| FieldReader { inner: self, tag: t }))
     }
-
-    /// Merges an existing instance of a value with a value from the input
     #[inline]
-    pub fn merge_value<T: raw::Value + Wrapper>(&mut self, value: &mut T::Inner) -> Result<()> {
-        T::wrap_mut(value).merge_from(self)
+    pub fn read_value<V: Value + Wrapper>(&mut self) -> Result<V::Inner> {
+        V::read_new(self).map(V::unwrap)
     }
-
-    /// Adds values from the input to the repeated value
     #[inline]
-    pub fn add_values_to<T>(&mut self, value: &mut impl collections::RepeatedValue<T>) -> Result<()> {
-        value.add_entries_from(self)
+    pub fn merge_value<V: Value + Wrapper>(&mut self, value: &mut V::Inner) -> Result<()> {
+        V::wrap_mut(value).merge_from(self)
     }
-
-    /// Tries to add the field to the set, possibly adding the field or yielding control to another set
     #[inline]
-    pub fn try_add_field_to<'b>(&'b mut self, value: &mut impl crate::FieldSet) -> Result<crate::TryRead<'b, 'a>> {
+    pub fn add_entries_to<U: RepeatedValue<V> + Wrapper, V>(&mut self, value: &mut U::Inner) -> Result<()> {
+        U::wrap_mut(value).add_entries_from(self)
+    }
+    #[inline]
+    pub fn try_add_field_to<'a, U: FieldSet>(&'a mut self, value: &mut U) -> Result<TryRead<'a, T>> {
         value.try_add_field_from(self)
     }
 }

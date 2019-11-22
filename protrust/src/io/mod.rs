@@ -4,8 +4,8 @@ pub mod stream;
 pub mod read;
 pub mod write;
 
-pub use read::CodedReader;
-pub use write::CodedWriter;
+pub use read::{Input, CodedReader};
+pub use write::{Output, CodedWriter};
 
 use alloc::alloc::Layout;
 use alloc::boxed::Box;
@@ -15,7 +15,8 @@ use core::fmt::{self, Display, Formatter};
 use core::mem;
 use core::num::NonZeroU32;
 use core::slice;
-use crate::{collections, raw};
+use crate::collections::{RepeatedValue, FieldSet};
+use crate::raw::Value;
 use trapper::Wrapper;
 
 #[cfg(feature = "std")]
@@ -285,22 +286,19 @@ impl Length {
         Length(x)
     }
 
-    /// Calculates the length of the value
-    #[inline]
-    pub fn for_value<T: raw::Value + Wrapper>(value: &T::Inner) -> Option<Length> {
-        T::wrap_ref(value).calculate_size(LengthBuilder::new()).map(LengthBuilder::build)
+    /// Returns the length of the value in the specified form
+    pub fn of_value<V: Value + Wrapper>(value: &V::Inner) -> Option<Length> {
+        LengthBuilder::new().add_value::<V>(value).map(LengthBuilder::build)
     }
 
-    /// Calculates the length of a collection of values
-    #[inline]
-    pub fn for_values<T>(value: &impl collections::RepeatedValue<T>, tag: Tag) -> Option<Length> {
-        value.calculate_size(LengthBuilder::new(), tag).map(LengthBuilder::build)
+    /// Returns the length of the set of values with the specified tag
+    pub fn of_values<T: RepeatedValue<V> + Wrapper, V>(value: &T::Inner, tag: Tag) -> Option<Length> {
+        LengthBuilder::new().add_values::<T, V>(value, tag).map(LengthBuilder::build)
     }
 
-    /// Calculates the length of a set of fields
-    #[inline]
-    pub fn for_fields(value: &impl crate::FieldSet) -> Option<Length> {
-        value.calculate_size(LengthBuilder::new()).map(LengthBuilder::build)
+    /// Returns the length of the field set
+    pub fn of_fields<T: FieldSet>(value: &T) -> Option<Length> {
+        LengthBuilder::new().add_fields::<T>(value).map(LengthBuilder::build)
     }
 }
 
@@ -318,7 +316,7 @@ pub struct LengthBuilder(i32);
 impl LengthBuilder {
     /// Creates a new length builder
     #[inline]
-    pub fn new() -> LengthBuilder {
+    pub const fn new() -> LengthBuilder {
         Self(0)
     }
 
@@ -332,42 +330,33 @@ impl LengthBuilder {
         return Some(LengthBuilder(self.0 + value));
     }
 
-    /// Adds a tag to the output
+    /// Adds a tag's size to the length
     #[inline]
     pub fn add_tag(self, tag: Tag) -> Option<Self> {
-        self.add_bytes(raw::raw_varint32_size(tag.get()).get())
+        self.add_bytes(raw_varint32_size(tag.get()).get())
     }
 
-    /// Adds a value's size to the length, returning None if the value's size is invalid
+    /// Adds a value's length to this instance
     #[inline]
-    pub fn add_value<T: raw::Value + Wrapper>(self, value: &T::Inner) -> Option<Self> {
-        T::wrap_ref(value).calculate_size(self)
+    pub fn add_value<V: Value + Wrapper>(self, value: &V::Inner) -> Option<Self> {
+        V::wrap_ref(value).calculate_size(self)
     }
 
-    /// Adds a value's size to the length if it exists, otherwise does nothing
+    /// Adds a value collection's length to this instance with the specified tag
     #[inline]
-    pub fn add_optional_value<T: raw::Value + Wrapper>(self, value: Option<&T::Inner>) -> Option<Self> {
-        match value {
-            Some(value) => self.add_value::<T>(value),
-            None => Some(self)
-        }
+    pub fn add_values<T: RepeatedValue<V> + Wrapper, V>(self, value: &T::Inner, tag: Tag) -> Option<Self> {
+        T::wrap_ref(value).calculate_size(self, tag)
     }
 
-    /// Adds a repeated value's size to the length
+    /// Adds the length of the fields in the set to this instance
     #[inline]
-    pub fn add_values<V>(self, value: &impl collections::RepeatedValue<V>, tag: Tag) -> Option<Self> {
-        value.calculate_size(self, tag)
-    }
-
-    /// Adds a set of fields to the length
-    #[inline]
-    pub fn add_fields(self, value: &impl crate::FieldSet) -> Option<Self> {
+    pub fn add_fields<T: FieldSet>(self, value: &T) -> Option<Self> {
         value.calculate_size(self)
     }
 
     /// Consumes the builder, returning a [`Length`](struct.Length.html) for writing to an output
     #[inline]
-    pub fn build(self) -> Length {
+    pub const fn build(self) -> Length {
         Length(self.0)
     }
 }
@@ -395,6 +384,16 @@ impl ByteString for Vec<u8> {
     fn new(len: usize) -> Self {
         <Box<[u8]> as ByteString>::new(len).into_vec()
     }
+}
+
+#[inline]
+pub(crate) const fn raw_varint32_size(value: u32) -> Length {
+    unsafe { Length::new_unchecked((((31 ^ (value | 1).leading_zeros()) * 9 + 73) / 64) as i32) }
+}
+
+#[inline]
+pub(crate) const fn raw_varint64_size(value: u64) -> Length {
+    unsafe { Length::new_unchecked((((63 ^ (value | 1).leading_zeros()) * 9 + 73) / 64) as i32) }
 }
 
 #[cfg(test)]
