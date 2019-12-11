@@ -45,16 +45,16 @@ pub trait Read {
         let mut buf = [0; BUF_SIZE];
         while len != 0 {
             let amnt = cmp::min(len, buf.len());
-            if let Ok(read_len) = self.read(&mut buf[..amnt]) {
-                len -= read_len;
-            } else {
-                return Err(Error);
+            match self.read(&mut buf[..amnt]) {
+                Ok(0) | Err(Error) => return Err(Error),
+                Ok(read_len) => len -= read_len,
             }
         }
         Ok(())
     }
 }
 
+#[cfg(not(feature = "std"))]
 impl<R: Read + ?Sized> Read for &mut R {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -145,5 +145,310 @@ impl Write for Vec<u8> {
         }
         self[old_len..].copy_from_slice(buf);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(feature = "std"))]
+mod test {
+    use crate::io::stream::{Write, Read, Error};
+
+    #[test]
+    fn read_all() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut buf = [0u8; 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.read(&mut buf);
+
+        assert_eq!(result, Ok(10));
+        assert_eq!(read, &[]);
+        assert_eq!(data, buf);
+    }
+    #[test]
+    fn read_less() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut buf = [0u8; 5];
+
+        let mut read: &[u8] = &data;
+        let result = read.read(&mut buf);
+
+        assert_eq!(result, Ok(5));
+        assert_eq!(read, &data[5..10]);
+        assert_eq!(&data[0..5], &buf);
+    }
+    #[test]
+    fn read_more() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut buf = [0u8; 11];
+
+        let mut read: &[u8] = &data;
+        let result = read.read(&mut buf);
+
+        assert_eq!(result, Ok(10));
+        assert_eq!(read, &[]);
+        assert_eq!(data, &buf[0..10]);
+    }
+    #[test]
+    fn read_none() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.read(&mut []);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(read, &data);
+    }
+    #[test]
+    fn skip_all() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.skip(10);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &[]);
+    }
+    #[test]
+    fn skip_less() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.skip(5);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &data[5..10]);
+
+        let result = read.skip(5);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &[]);
+    }
+    #[test]
+    fn skip_more() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.skip(11);
+
+        assert_eq!(result, Err(Error));
+    }
+    #[test]
+    fn skip_none() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.skip(0);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &data);
+    }
+
+    #[test]
+    fn write_slice_all() {
+        let mut buf = [0u8; 10];
+        let data = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut write: &mut [u8] = &mut buf;
+        let result = write.write(data);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(write, &mut []);
+        assert_eq!(&buf, data);
+    }
+    #[test]
+    fn write_slice_less() {
+        let mut buf = [0u8; 10];
+        let data = &[1, 2, 3, 4, 5];
+
+        let mut write: &mut [u8] = &mut buf;
+        let result = write.write(data);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(write.len(), 5);
+        assert_eq!(&buf[0..5], data);
+    }
+    #[test]
+    fn write_slice_more() {
+        let mut buf = [0u8; 10];
+        let data = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+        let mut write: &mut [u8] = &mut buf;
+        let result = write.write(data);
+
+        assert_eq!(result, Err(Error));
+    }
+    #[test]
+    fn write_slice_none() {
+        let mut buf = [0u8; 10];
+        let data = &[];
+
+        let mut write: &mut [u8] = &mut buf;
+        let result = write.write(data);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(&*write, &[0u8; 10]);
+    }
+
+    #[test]
+    fn write_vec() {
+        let mut vec = alloc::vec::Vec::new();
+        let data = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let result = vec.write(data);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(vec.len(), 10);
+        assert_eq!(vec.as_slice(), data);
+
+        let result = vec.write(data);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(vec.len(), 20);
+        assert_eq!(&vec[0..10], data);
+        assert_eq!(&vec[10..20], data);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "std")]
+mod test {
+    use crate::io::stream::{Write, Read, Error};
+
+    #[test]
+    fn read_all() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut buf = [0u8; 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.read(&mut buf);
+
+        assert_eq!(result, Ok(10));
+        assert_eq!(read, &[]);
+        assert_eq!(data, buf);
+    }
+    #[test]
+    fn read_less() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut buf = [0u8; 5];
+
+        let mut read: &[u8] = &data;
+        let result = read.read(&mut buf);
+
+        assert_eq!(result, Ok(5));
+        assert_eq!(read, &data[5..10]);
+        assert_eq!(&data[0..5], &buf);
+    }
+    #[test]
+    fn read_more() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let mut buf = [0u8; 11];
+
+        let mut read: &[u8] = &data;
+        let result = read.read(&mut buf);
+
+        assert_eq!(result, Ok(10));
+        assert_eq!(read, &[]);
+        assert_eq!(data, &buf[0..10]);
+    }
+    #[test]
+    fn read_none() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.read(&mut []);
+
+        assert_eq!(result, Ok(0));
+        assert_eq!(read, &data);
+    }
+    #[test]
+    fn skip_all() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.skip(10);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &[]);
+    }
+    #[test]
+    fn skip_less() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.skip(5);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &data[5..10]);
+
+        let result = read.skip(5);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &[]);
+    }
+    #[test]
+    fn skip_more() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.skip(11);
+
+        assert_eq!(result, Err(Error));
+    }
+    #[test]
+    fn skip_none() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.skip(0);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &data);
+    }
+
+    #[test]
+    fn write_all() {
+        let mut buf = [0u8; 10];
+        let data = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut write: &mut [u8] = &mut buf;
+        let result = write.write(data);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(write, &mut []);
+        assert_eq!(&buf, data);
+    }
+    #[test]
+    fn write_less() {
+        let mut buf = [0u8; 10];
+        let data = &[1, 2, 3, 4, 5];
+
+        let mut write: &mut [u8] = &mut buf;
+        let result = write.write(data);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(write.len(), 5);
+        assert_eq!(&buf[0..5], data);
+    }
+    #[test]
+    fn write_more() {
+        let mut buf = [0u8; 10];
+        let data = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+        let mut write: &mut [u8] = &mut buf;
+        let result = write.write(data);
+
+        assert_eq!(result, Err(Error));
+    }
+    #[test]
+    fn write_none() {
+        let mut buf = [0u8; 10];
+        let data = &[];
+
+        let mut write: &mut [u8] = &mut buf;
+        let result = write.write(data);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(&*write, &[0u8; 10]);
     }
 }
