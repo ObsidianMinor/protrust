@@ -24,4 +24,3 @@ features = ["nightly"]
 
 [dev-dependencies]
 criterion = "0.3"
-assert_matches = "1.3"
