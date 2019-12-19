@@ -1,11 +1,11 @@
 //! Defines collection types used by generated code for repeated and map fields
 
 use crate::{Mergable, internal::Sealed};
-use crate::io::{self, read, write, WireType, FieldNumber, Tag, LengthBuilder, CodedReader, CodedWriter, Input, Output};
+use crate::io::{self, read, write, WireType, FieldNumber, Tag, LengthBuilder, Length, CodedReader, CodedWriter, Input, Output};
 use crate::raw::{self, Value};
 use core::convert::TryInto;
 use core::hash::Hash;
-use trapper::{newtype, Wrapper};
+use trapper::Wrapper;
 
 pub mod unknown_fields;
 
@@ -63,67 +63,58 @@ impl<'a, T: Input> TryRead<'a, T> {
     }
 }
 
-newtype! {
-    /// A repeated field. This is the type used by generated code to represent a repeated field value (if it isn't a map).
-    pub type RepeatedField<T>(T);
-}
+pub type RepeatedField<T> = alloc::vec::Vec<T>;
 
 impl<T> Sealed for RepeatedField<T> { }
-impl<V: Value + Wrapper> RepeatedValue<V> for RepeatedField<alloc::vec::Vec<V::Inner>> {
+impl<V: Value + Wrapper> RepeatedValue<V> for RepeatedField<V::Inner> {
     #[inline]
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         if let Some(last_tag) = input.last_tag() {
             if WireType::is_packable(V::WIRE_TYPE) && last_tag.wire_type() == WireType::LengthDelimited {
-                let len = input.read_limit()?;
-                unsafe {
-                    let old = input.push_limit(len)?;
-                    while !input.reached_limit() {
-                        self.0.push(input.read_value::<V>()?);
-                    }
-                    input.pop_limit(old);
-                }
+                input.read_limit()?.for_all(|input| input.read_value::<V>().map(|v| self.push(v)))
             } else {
-                self.0.push(input.read_value::<V>()?);
+                input.read_value::<V>().map(|v| self.push(v))
             }
+        } else {
+            Ok(())
         }
-        Ok(())
     }
     #[inline]
     fn calculate_size(&self, builder: LengthBuilder, tag: Tag) -> Option<LengthBuilder> {
-        if self.0.is_empty() {
+        if self.is_empty() {
             return Some(builder);
         }
 
-        let len: i32 = self.0.len().try_into().ok()?;
+        let len: i32 = self.len().try_into().ok()?;
 
-        let tag_len = io::raw_varint32_size(tag.get()).get();
+        let tag_len = io::raw_varint32_size(tag.get());
         let builder =
             if WireType::is_packable(V::WIRE_TYPE) && tag.wire_type() == WireType::LengthDelimited {
                 builder.add_bytes(tag_len)
             } else {
-                builder.add_bytes({
+                builder.add_bytes(Length::new({
                     #[cfg(feature = "checked_size")]
-                    { tag_len.checked_mul(len)? }
+                    { tag_len.get().checked_mul(len)? }
                     #[cfg(not(feature = "checked_size"))]
-                    { tag_len * len }
-                })
+                    { tag_len.get() * len }
+                })?)
             }?;
         <Self as ValuesSize<V>>::calculate_size(self, builder)
     }
     #[inline]
     fn write_to<T: Output>(&self, output: &mut CodedWriter<T>, tag: Tag) -> write::Result {
-        if self.0.is_empty() {
+        if self.is_empty() {
             return Ok(());
         }
 
         if WireType::is_packable(V::WIRE_TYPE) && tag.wire_type() == WireType::LengthDelimited {
             let len = <Self as ValuesSize<V>>::calculate_size(self, LengthBuilder::new()).ok_or(write::Error::ValueTooLarge)?.build();
             output.write_length(len)?;
-            for value in &self.0 {
+            for value in self {
                 output.write_value::<V>(value)?;
             }
         } else {
-            for value in &self.0 {
+            for value in self {
                 output.write_tag(tag)?;
                 output.write_value::<V>(value)?;
             }
@@ -131,28 +122,23 @@ impl<V: Value + Wrapper> RepeatedValue<V> for RepeatedField<alloc::vec::Vec<V::I
         Ok(())
     }
     fn is_initialized(&self) -> bool {
-        self.0.iter().map(V::wrap_ref).all(V::is_initialized)
+        self.iter().map(V::wrap_ref).all(V::is_initialized)
     }
 }
-impl<V: Clone> Mergable for alloc::vec::Vec<V> {
+impl<V: Clone> Mergable for RepeatedField<V> {
     /// Merges two repeated fields by extending this field with the elements of the other
     fn merge(&mut self, other: &Self) {
         self.extend(other.iter().cloned())
     }
 }
 
-newtype! {
-    /// A map field. This is the type used by generated code to represent a map field value.
-    pub type MapField<T>(T);
-}
+pub type MapField<K, V> = hashbrown::HashMap<K, V>;
 
-impl<T> MapField<T> {
-    const KEY_FIELD: FieldNumber = unsafe { FieldNumber::new_unchecked(1) };
-    const VALUE_FIELD: FieldNumber = unsafe { FieldNumber::new_unchecked(2) };
-}
+const KEY_FIELD: FieldNumber = unsafe { FieldNumber::new_unchecked(1) };
+const VALUE_FIELD: FieldNumber = unsafe { FieldNumber::new_unchecked(2) };
 
-impl<T> Sealed for MapField<T> { }
-impl<K, V> RepeatedValue<(K, V)> for MapField<hashbrown::HashMap<K::Inner, V::Inner>>
+impl<K, V> Sealed for MapField<K, V> { }
+impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
     where 
         K: Value + Wrapper,
         K::Inner: Default + Eq + Hash,
@@ -160,33 +146,31 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<hashbrown::HashMap<K::Inner, V::In
         V::Inner: Default
 {
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
-        let key_tag = Tag::new(Self::KEY_FIELD, K::WIRE_TYPE);
-        let value_tag = Tag::new(Self::VALUE_FIELD, V::WIRE_TYPE);
+        let key_tag = Tag::new(KEY_FIELD, K::WIRE_TYPE);
+        let value_tag = Tag::new(VALUE_FIELD, V::WIRE_TYPE);
 
-        let mut key = None;
-        let mut value = None;
-        let len = input.read_limit()?;
-        unsafe {
-            let old = input.push_limit(len)?;
-            while let Some(tag) = input.read_tag()? {
-                match tag {
-                    t if t == key_tag => key = Some(input.read_value::<K>()?),
-                    v if v == value_tag => value = Some(input.read_value::<V>()?),
-                    _ => input.skip()?,
-                }
+        let mut key = None::<K::Inner>;
+        let mut value = None::<V::Inner>;
+        input.read_limit()?.then(|input| {
+            while let Some(field) = input.read_field()? {
+                match field.tag() {
+                    k if k == key_tag.get() => field.read_value(key_tag, |input| input.read_value::<K>().map(|k| key = Some(k))),
+                    v if v == value_tag.get() => field.read_value(value_tag, |input| input.read_value::<V>().map(|v| value = Some(v))),
+                    _ => input.skip(),
+                }?
             }
-            input.pop_limit(old);
-        }
-        self.0.insert(key.unwrap_or_default(), value.unwrap_or_default());
+            Ok(())
+        })?;
+        self.insert(key.unwrap_or_default(), value.unwrap_or_default());
 
         Ok(())
     }
     fn calculate_size(&self, builder: LengthBuilder, tag: Tag) -> Option<LengthBuilder> {
-        if self.0.is_empty() {
+        if self.is_empty() {
             return Some(builder);
         }
 
-        let len: i32 = self.0.len().try_into().ok()?;
+        let len: i32 = self.len().try_into().ok()?;
         let tag_len = io::raw_varint32_size(tag.get()).get();
         let start_len = { // every size calculation starts with the size of all tags
             #[cfg(feature = "checked_size")]
@@ -194,45 +178,42 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<hashbrown::HashMap<K::Inner, V::In
             #[cfg(not(feature = "checked_size"))]
             { (len * tag_len) + (len * 2) }
         };
-        let mut builder = builder.add_bytes(start_len)?;
-        for (key, value) in &self.0 {
+        let mut builder = builder.add_bytes(Length::new(start_len)?)?;
+        for (key, value) in self {
             let entry_len = 
                 LengthBuilder::new()
-                    .add_bytes(2)?
+                    .add_bytes(unsafe { Length::new_unchecked(2) })?
                     .add_value::<K>(key)?
                     .add_value::<V>(value)?
-                    .build()
-                    .get();
-            builder = builder.add_value::<raw::Uint32>(&(entry_len as u32))?.add_bytes(entry_len)?; // add the length size with the entry size
+                    .build();
+            builder = builder.add_value::<raw::Uint32>(&(entry_len.get() as u32))?.add_bytes(entry_len)?; // add the length size with the entry size
         }
         Some(builder)
     }
     fn write_to<T: Output>(&self, output: &mut CodedWriter<T>, tag: Tag) -> write::Result {
-        if self.0.is_empty() {
+        if self.is_empty() {
             return Ok(());
         }
 
-        for (key, value) in &self.0 {
+        for (key, value) in self {
             output.write_tag(tag)?;
             let length = 
                 LengthBuilder::new()
-                    .add_bytes(2).unwrap()
-                    .add_value::<K>(key)
-                    .and_then(|b| 
-                        b.add_value::<V>(value))
-                    .map(|b| b.build())
-                    .ok_or(write::Error::ValueTooLarge)?;
+                    .add_bytes(unsafe { Length::new_unchecked(2) }).ok_or(write::Error::ValueTooLarge)?
+                    .add_value::<K>(key).ok_or(write::Error::ValueTooLarge)?
+                    .add_value::<V>(value).ok_or(write::Error::ValueTooLarge)?
+                    .build();
             output.write_length(length)?;
-            output.write_tag(Tag::new(Self::KEY_FIELD, K::WIRE_TYPE))?;
+            output.write_tag(Tag::new(KEY_FIELD, K::WIRE_TYPE))?;
             output.write_value::<K>(key)?;
-            output.write_tag(Tag::new(Self::VALUE_FIELD, V::WIRE_TYPE))?;
+            output.write_tag(Tag::new(VALUE_FIELD, V::WIRE_TYPE))?;
             output.write_value::<V>(value)?;
         }
 
         Ok(())
     }
     fn is_initialized(&self) -> bool {
-        self.0.values().map(V::wrap_ref).all(V::is_initialized)
+        self.values().map(V::wrap_ref).all(V::is_initialized)
     }
 }
 
@@ -252,28 +233,28 @@ trait ValuesSize<T> {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
 }
 
-impl<V> ValuesSize<V> for RepeatedField<alloc::vec::Vec<V::Inner>>
+impl<V> ValuesSize<V> for RepeatedField<V::Inner>
     where V: Value + Wrapper
 {
     default fn calculate_size(&self, mut builder: LengthBuilder) -> Option<LengthBuilder> {
-        for value in &self.0 {
+        for value in self {
             builder = builder.add_value::<V>(value)?;
         }
         Some(builder)
     }
 }
 
-impl<V> ValuesSize<V> for RepeatedField<alloc::vec::Vec<V::Inner>>
+impl<V> ValuesSize<V> for RepeatedField<V::Inner>
     where V: raw::ConstSized + Wrapper
 {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         let size = V::SIZE;
-        let len: i32 = self.0.len().try_into().ok()?;
+        let len: i32 = self.len().try_into().ok()?;
 
         #[cfg(feature = "checked_size")]
         return builder.add_bytes(len.checked_mul(size)?);
 
         #[cfg(not(feature = "checked_size"))]
-        return builder.add_bytes(len * size);
+        return builder.add_bytes(Length::new(len * size.get())?);
     }
 }

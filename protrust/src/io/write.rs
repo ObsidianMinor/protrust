@@ -2,6 +2,7 @@
 
 use core::fmt::{self, Display, Formatter};
 use core::mem::ManuallyDrop;
+use core::ops;
 use core::ptr::NonNull;
 use crate::collections::{RepeatedValue, FieldSet};
 use crate::internal::Sealed;
@@ -13,19 +14,64 @@ use trapper::Wrapper;
 use std::error;
 
 mod internal {
-    use core::marker::PhantomData;
-    use super::Any;
+    use core::convert::TryFrom;
+    use core::mem;
+    use crate::io::{internal::Array, stream, raw_varint32_size, raw_varint64_size};
+    use super::{Any, Result, Error};
 
     pub trait Writer {
+        fn write_varint32(&mut self, value: u32) -> Result;
+        fn write_varint64(&mut self, value: u64) -> Result;
+        fn write_bit32(&mut self, value: u32) -> Result;
+        fn write_bit64(&mut self, value: u64) -> Result;
+        fn write_length_delimited(&mut self, value: &[u8]) -> Result;
+
         fn into_any<'a>(&'a mut self) -> Any<'a>;
         fn from_any<'a>(&'a mut self, any: Any<'a>);
     }
 
     pub struct FlatBuffer<'a> {
-        a: PhantomData<&'a mut [u8]>
+        inner: &'a mut [u8]
+    }
+
+    impl<'a> FlatBuffer<'a> {
+        #[inline]
+        pub fn write_array<A: Array>(&mut self, value: A) -> Result {
+            if A::LENGTH > self.inner.len() {
+                Err(stream::Error.into())
+            } else {
+                let (a, b) = mem::replace(&mut self.inner, &mut []).split_at_mut(A::LENGTH);
+                a.copy_from_slice(value.as_ref());
+                self.inner = b;
+                Ok(())
+            }
+        }
     }
 
     impl Writer for FlatBuffer<'_> {
+        fn write_varint32(&mut self, value: u32) -> Result {
+            unimplemented!()
+        }
+        fn write_varint64(&mut self, value: u64) -> Result {
+            unimplemented!()
+        }
+        fn write_bit32(&mut self, value: u32) -> Result {
+            self.write_array(u32::to_le_bytes(value))
+        }
+        fn write_bit64(&mut self, value: u64) -> Result {
+            self.write_array(u64::to_le_bytes(value))
+        }
+        fn write_length_delimited(&mut self, value: &[u8]) -> Result {
+            let len = i32::try_from(value.len()).map_err(|_| Error::ValueTooLarge)?;
+            self.write_varint32(len as u32)?;
+            if self.inner.len() > value.len() {
+                self.inner[..value.len()].copy_from_slice(value);
+                Ok(())
+            } else {
+                Err(stream::Error.into())
+            }
+        }
+
         fn into_any<'a>(&'a mut self) -> Any<'a> {
             unimplemented!()
         }
@@ -97,6 +143,21 @@ impl<'a> Output for Any<'a> {
     type Writer = Self;
 }
 impl internal::Writer for Any<'_> {
+    fn write_varint32(&mut self, mut value: u32) -> Result {
+        unimplemented!()
+    }
+    fn write_varint64(&mut self, mut value: u64) -> Result {
+        unimplemented!()
+    }
+    fn write_bit32(&mut self, value: u32) -> Result {
+        unimplemented!()
+    }
+    fn write_bit64(&mut self, value: u64) -> Result {
+        unimplemented!()
+    }
+    fn write_length_delimited(&mut self, value: &[u8]) -> Result {
+        unimplemented!()
+    }
     fn into_any<'a>(&'a mut self) -> Any<'a> {
         Any { inner: self.inner.as_mut().map::<&'a mut dyn Write, _>(|v| &mut **v) }
     }
@@ -114,6 +175,20 @@ impl<'a, T: Output> AnyConverter<'a, T> {
             src: unsafe { NonNull::new_unchecked(src) }, // don't use from since the borrow moves into the from call
             brdg: ManuallyDrop::new(CodedWriter { inner: src.inner.into_any() })
         }
+    }
+}
+
+impl<'a, T: Output> ops::Deref for AnyConverter<'a, T> {
+    type Target = CodedWriter<Any<'a>>;
+
+    fn deref(&self) -> &CodedWriter<Any<'a>> {
+        &self.brdg
+    }
+}
+
+impl<'a, T: Output> ops::DerefMut for AnyConverter<'a, T> {
+    fn deref_mut(&mut self) -> &mut CodedWriter<Any<'a>> {
+        &mut self.brdg
     }
 }
 
@@ -173,129 +248,5 @@ impl<T: Output> CodedWriter<T> {
 
 #[cfg(test)]
 mod test {
-    use crate::io::{CodedWriter, Length};
-    use crate::raw::{Uint32, Uint64};
-
-    #[test]
-    fn varint32_encode() {
-        fn try_encode(value: u32, bytes: &[u8]) {
-            let mut output = [0u8; 5];
-            let mut writer = CodedWriter::with_slice(&mut output);
-            writer.write_varint32(value).unwrap();
-
-            let len = Length::for_value::<Uint32>(&value).unwrap().get() as usize;
-            let slice = &output[0..len];
-
-            assert_eq!(slice, bytes);
-        }
-
-        try_encode(0, &[0x80]);
-        try_encode(127, &[0xFF]);
-        try_encode(16_383, &[0x7F, 0xFF]);
-        try_encode(2_097_151, &[0x7F, 0x7F, 0xFF]);
-        try_encode(268_435_455, &[0x7F, 0x7F, 0x7F, 0xFF]);
-        try_encode(u32::max_value(), &[0x7F, 0x7F, 0x7F, 0x7F, 0x8F]);
-    }
-    #[test]
-    fn varint64_encode() {
-        fn try_encode(value: u64, bytes: &[u8]) {
-            let mut output = [0u8; 10];
-            let mut writer = CodedWriter::with_slice(&mut output);
-            writer.write_varint64(value).unwrap();
-
-            let len = Length::for_value::<Uint64>(&value).unwrap().get() as usize;
-            let slice = &output[0..len];
-
-            assert_eq!(slice, bytes);
-        }
-
-        try_encode(0, &[0x80]);
-        try_encode(127, &[0xFF]);
-        try_encode(16_383, &[0x7F, 0xFF]);
-        try_encode(2_097_151, &[0x7F, 0x7F, 0xFF]);
-        try_encode(268_435_455, &[0x7F, 0x7F, 0x7F, 0xFF]);
-        try_encode(u32::max_value() as u64, &[0x7F, 0x7F, 0x7F, 0x7F, 0x8F]);
-        try_encode(u64::max_value(), &[0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x81]);
-    }
-    #[test]
-    fn bit32_encode() {
-        let value = 25;
-
-        let mut output = [0u8; 4];
-        let mut writer = CodedWriter::with_slice(&mut output);
-        writer.write_bit32(value).unwrap();
-
-        assert_eq!(output, value.to_le_bytes());
-
-        let mut output = [0u8; 4];
-        let mut write = output.as_mut();
-        let mut writer = CodedWriter::with_write(&mut write);
-        writer.write_bit32(value).unwrap();
-
-        assert_eq!(output, value.to_le_bytes());
-    }
-    #[test]
-    fn bit64_encode() {
-        let value = 25;
-
-        let mut output = [0u8; 8];
-        let mut writer = CodedWriter::with_slice(&mut output);
-        writer.write_bit64(value).unwrap();
-
-        assert_eq!(output, value.to_le_bytes());
-
-        let mut output = [0u8; 8];
-        let mut write = output.as_mut();
-        let mut writer = CodedWriter::with_write(&mut write);
-        writer.write_bit64(value).unwrap();
-
-        assert_eq!(output, value.to_le_bytes());
-    }
-    #[test]
-    fn raw_bytes_encode() {
-        let mut output = [0u8];
-        let mut writer = CodedWriter::with_slice(&mut output);
-        writer.write_bytes(&[1]).unwrap();
-
-        assert_eq!(output, [1]);
-
-        let mut output = [0u8];
-        let mut write = output.as_mut();
-        let mut writer = CodedWriter::with_write(&mut write);
-        writer.write_bytes(&[1]).unwrap();
-
-        assert_eq!(output, [1]);
-    }
-
-    // test that writing a value to less than the value's required space remaining returns an error
-    macro_rules! fail_write_int {
-        ($n:ident, $f:ident) => {
-            #[test]
-            fn $f() {
-                let mut empty = [].as_mut();
-
-                let mut writer = CodedWriter::with_slice(empty);
-                assert!(writer.$f(10).is_err());
-
-                let mut writer = CodedWriter::with_write(&mut empty);
-                assert!(writer.$f(10).is_err());
-            }
-        };
-    }
-
-    fail_write_int!(fail_write_varint32, write_varint32);
-    fail_write_int!(fail_write_varint64, write_varint64);
-    fail_write_int!(fail_write_bit32, write_bit32);
-    fail_write_int!(fail_write_bit64, write_bit64);
-
-    #[test]
-    fn fail_write_bytes() {
-        let mut empty = [].as_mut();
-
-        let mut writer = CodedWriter::with_slice(empty);
-        assert!(writer.write_bytes(&[1]).is_err());
-
-        let mut writer = CodedWriter::with_write(&mut empty);
-        assert!(writer.write_bytes(&[1]).is_err());
-    }
+    
 }

@@ -1,5 +1,4 @@
-//! Contains types for protobuf values and traits for value operations. 
-//! Each value with specific serialization or deserialization, a specific 
+//! Contains types for protobuf values and traits for value operations.
 
 use alloc::vec::Vec;
 use core::convert::TryInto;
@@ -31,7 +30,7 @@ pub trait Value: Sized + Sealed {
 /// A value with a constant size. This can be specialized over to enable certain optimizations with size caculations.
 pub trait ConstSized: Value {
     /// The constant size of the value
-    const SIZE: i32;
+    const SIZE: Length;
 }
 
 newtype! {
@@ -45,9 +44,9 @@ impl Value for Int32 {
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         if self.0 >= 0 {
-            builder.add_bytes(io::raw_varint32_size(self.0 as u32).get())
+            builder.add_bytes(io::raw_varint32_size(self.0 as u32))
         } else {
-            builder.add_bytes(10)
+            builder.add_bytes(unsafe { Length::new_unchecked(10) })
         }
     }
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
@@ -76,7 +75,7 @@ impl Value for Uint32 {
     const WIRE_TYPE: WireType = WireType::Varint;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-        builder.add_bytes(io::raw_varint32_size(self.0).get())
+        builder.add_bytes(io::raw_varint32_size(self.0))
     }
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
@@ -100,7 +99,7 @@ impl Value for Int64 {
     const WIRE_TYPE: WireType = WireType::Varint;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-        builder.add_bytes(io::raw_varint64_size(self.0 as u64).get())
+        builder.add_bytes(io::raw_varint64_size(self.0 as u64))
     }
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
@@ -124,7 +123,7 @@ impl Value for Uint64 {
     const WIRE_TYPE: WireType = WireType::Varint;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-        builder.add_bytes(io::raw_varint64_size(self.0).get())
+        builder.add_bytes(io::raw_varint64_size(self.0))
     }
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
@@ -150,7 +149,7 @@ impl Value for Sint32 {
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         let n = self.0 as u32;
-        builder.add_bytes(io::raw_varint32_size((n << 1) ^ (n >> 31)).get())
+        builder.add_bytes(io::raw_varint32_size((n << 1) ^ (n >> 31)))
     }
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
@@ -177,7 +176,7 @@ impl Value for Sint64 {
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         let n = self.0 as u64;
-        builder.add_bytes(io::raw_varint64_size((n << 1) ^ (n >> 63)).get())
+        builder.add_bytes(io::raw_varint64_size((n << 1) ^ (n >> 63)))
     }
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
@@ -216,7 +215,7 @@ impl Value for Fixed32 {
     }
 }
 impl ConstSized for Fixed32 {
-    const SIZE: i32 = 4;
+    const SIZE: Length = unsafe { Length::new_unchecked(4) };
 }
 
 newtype! {
@@ -243,7 +242,7 @@ impl Value for Fixed64 {
     }
 }
 impl ConstSized for Fixed64 {
-    const SIZE: i32 = 8;
+    const SIZE: Length = unsafe { Length::new_unchecked(8) };
 }
 
 newtype! {
@@ -270,7 +269,7 @@ impl Value for Sfixed32 {
     }
 }
 impl ConstSized for Sfixed32 {
-    const SIZE: i32 = 4;
+    const SIZE: Length = unsafe { Length::new_unchecked(4) };
 }
 
 newtype! {
@@ -297,7 +296,7 @@ impl Value for Sfixed64 {
     }
 }
 impl ConstSized for Sfixed64 {
-    const SIZE: i32 = 8;
+    const SIZE: Length = unsafe { Length::new_unchecked(8) };
 }
 
 newtype! {
@@ -320,11 +319,11 @@ impl Value for Bool {
     }
     fn is_initialized(&self) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self> {
-        input.read_varint32().map(|v| Self(v != 0))
+        input.read_varint64().map(|v| Self(v != 0))
     }
 }
 impl ConstSized for Bool {
-    const SIZE: i32 = 1;
+    const SIZE: Length = unsafe { Length::new_unchecked(1) };
 }
 
 newtype! {
@@ -338,7 +337,7 @@ impl Value for String {
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         let len: i32 = self.0.len().try_into().ok()?;
-        builder.add_bytes(len)
+        builder.add_bytes(Length::new(len)?)
     }
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
@@ -365,7 +364,7 @@ impl<T: ByteString> Value for Bytes<T> {
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         let len: i32 = self.0.as_ref().len().try_into().ok()?;
-        builder.add_bytes(len)
+        builder.add_bytes(Length::new(len)?)
     }
     fn merge_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()> {
         Self::read_new(input).map(|v| *self = v)
@@ -416,13 +415,7 @@ impl<T: TraitMessage> Value for Message<T> {
         self.0.calculate_size(builder)
     }
     fn merge_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()> {
-        let len = input.read_limit()?;
-        unsafe {
-            let old = input.push_limit(len)?;
-            self.0.merge_from(input)?;
-            input.pop_limit(old);
-        }
-        Ok(())
+        input.read_limit()?.then(|input| self.0.merge_from(input))
     }
     fn write_to<U: Output>(&self, output: &mut CodedWriter<U>) -> write::Result {
         let length = Length::of_value::<Self>(&self.0).ok_or(io::write::Error::ValueTooLarge)?;

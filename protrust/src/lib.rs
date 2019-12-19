@@ -1,10 +1,12 @@
 //! A fast, feature complete, protobuf implementation.
 
+#![feature(const_fn)]
 #![feature(read_initializer)]
 #![feature(specialization)]
 #![feature(box_into_raw_non_null)]
 #![feature(new_uninit)]
 #![feature(manually_drop_take)]
+#![feature(matches_macro)]
 
 #![warn(missing_docs)]
 
@@ -19,6 +21,7 @@ mod internal {
     pub trait Sealed { }
 }
 pub mod collections;
+pub mod extend;
 pub mod io;
 pub mod raw;
 

@@ -22,6 +22,24 @@ use trapper::Wrapper;
 #[cfg(feature = "std")]
 use std::error::Error;
 
+mod internal {
+    pub trait Array: AsRef<[u8]> + AsMut<[u8]> {
+        const LENGTH: usize;
+    }
+
+    macro_rules! fva {
+        ($($len:literal),*) => {
+            $(
+                impl Array for [u8; $len] {
+                    const LENGTH: usize = $len;
+                }
+            )*
+        };
+    }
+
+    fva!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+}
+
 /// The wire type of a protobuf value.
 ///
 /// A wire type is paired with a field number between 1 and 536,870,911 to create a tag,
@@ -292,7 +310,7 @@ impl Length {
     }
 
     /// Returns the length of the set of values with the specified tag
-    pub fn of_values<T: RepeatedValue<V> + Wrapper, V>(value: &T::Inner, tag: Tag) -> Option<Length> {
+    pub fn of_values<T: RepeatedValue<V>, V>(value: &T, tag: Tag) -> Option<Length> {
         LengthBuilder::new().add_values::<T, V>(value, tag).map(LengthBuilder::build)
     }
 
@@ -322,34 +340,39 @@ impl LengthBuilder {
 
     /// Adds an arbitrary number of bytes to the length
     #[inline]
-    pub fn add_bytes(self, value: i32) -> Option<Self> {
+    #[must_use = "this returns the builder to chain and does not mutate it in place"]
+    pub fn add_bytes(self, value: Length) -> Option<Self> {
         #[cfg(feature = "checked_size")]
-        return self.0.checked_add(value).map(LengthBuilder);
+        return self.0.checked_add(value.get()).map(LengthBuilder);
 
         #[cfg(not(feature = "checked_size"))]
-        return Some(LengthBuilder(self.0 + value));
+        return Some(LengthBuilder(self.0 + value.get()));
     }
 
     /// Adds a tag's size to the length
     #[inline]
+    #[must_use = "this returns the builder to chain and does not mutate it in place"]
     pub fn add_tag(self, tag: Tag) -> Option<Self> {
-        self.add_bytes(raw_varint32_size(tag.get()).get())
+        self.add_bytes(raw_varint32_size(tag.get()))
     }
 
     /// Adds a value's length to this instance
     #[inline]
+    #[must_use = "this returns the builder to chain and does not mutate it in place"]
     pub fn add_value<V: Value + Wrapper>(self, value: &V::Inner) -> Option<Self> {
         V::wrap_ref(value).calculate_size(self)
     }
 
     /// Adds a value collection's length to this instance with the specified tag
     #[inline]
-    pub fn add_values<T: RepeatedValue<V> + Wrapper, V>(self, value: &T::Inner, tag: Tag) -> Option<Self> {
-        T::wrap_ref(value).calculate_size(self, tag)
+    #[must_use = "this returns the builder to chain and does not mutate it in place"]
+    pub fn add_values<T: RepeatedValue<V>, V>(self, value: &T, tag: Tag) -> Option<Self> {
+        value.calculate_size(self, tag)
     }
 
     /// Adds the length of the fields in the set to this instance
     #[inline]
+    #[must_use = "this returns the builder to chain and does not mutate it in place"]
     pub fn add_fields<T: FieldSet>(self, value: &T) -> Option<Self> {
         value.calculate_size(self)
     }
@@ -398,54 +421,5 @@ pub(crate) const fn raw_varint64_size(value: u64) -> Length {
 
 #[cfg(test)]
 mod test {
-    use assert_matches::assert_matches;
-    use crate::io::{CodedWriter, write::Result as WriterResult, CodedReader, Tag, FieldNumber, WireType};
-    use alloc::boxed::Box;
-
-    #[test]
-    fn roundtrip_many_values() {
-        fn write(output: &mut CodedWriter) -> WriterResult {
-            output.write_tag(Tag::new(FieldNumber::new(1).unwrap(), WireType::Varint))?;
-            output.write_varint32(1)?;
-            output.write_tag(Tag::new(FieldNumber::new(2).unwrap(), WireType::Varint))?;
-            output.write_varint64(u64::max_value())?;
-            output.write_tag(Tag::new(FieldNumber::new(3).unwrap(), WireType::Bit32))?;
-            output.write_bit32(123)?;
-            output.write_tag(Tag::new(FieldNumber::new(4).unwrap(), WireType::Bit64))?;
-            output.write_bit64(1234567890)?;
-            output.write_tag(Tag::new(FieldNumber::new(5).unwrap(), WireType::LengthDelimited))?;
-            output.write_length_delimited(&[12])?;
-            Ok(())
-        }
-        fn read(input: &mut CodedReader) {
-            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(1).unwrap(), WireType::Varint)));
-            assert_matches!(input.read_varint32(), Ok(1));
-            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(2).unwrap(), WireType::Varint)));
-            assert_matches!(input.read_varint64(), Ok(core::u64::MAX));
-            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(3).unwrap(), WireType::Bit32)));
-            assert_matches!(input.read_bit32(), Ok(123));
-            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(4).unwrap(), WireType::Bit64)));
-            assert_matches!(input.read_bit64(), Ok(1234567890));
-            assert_matches!(input.read_tag(), Ok(Some(tag)) => assert_eq!(tag, Tag::new(FieldNumber::new(5).unwrap(), WireType::LengthDelimited)));
-            assert_matches!(input.read_length_delimited::<Box<_>>(), Ok(ref value) if value.as_ref().eq(&[12]));
-        }
-
-        // (5 * 1 byte) tags + 1 1 byte varint + 1 10 byte varint + 1 32-bit fixed + 1 64-bit fixed + 1 1 byte length delimited (2 bytes)
-
-        let mut data = [0u8; 30];
-        let mut writer = CodedWriter::with_slice(&mut data);
-        write(&mut writer).unwrap();
-
-        let mut input = CodedReader::with_slice(&data);
-        read(&mut input);
-
-        let mut data = [0u8; 30];
-        let mut bytes = data.as_mut();
-        let mut writer = CodedWriter::with_write(&mut bytes);
-        write(&mut writer).unwrap();
-
-        let mut bytes = data.as_ref();
-        let mut input = CodedReader::with_read(&mut bytes);
-        read(&mut input);
-    }
+    
 }
