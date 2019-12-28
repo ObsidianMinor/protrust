@@ -13,6 +13,7 @@ use core::ptr::NonNull;
 use core::result;
 use core::slice;
 use crate::collections::{RepeatedValue, FieldSet, TryRead};
+use crate::extend::ExtensionRegistry;
 use crate::io::{Tag, WireType, ByteString, stream::{self, Read}};
 use crate::raw::{self, Value};
 use trapper::Wrapper;
@@ -660,13 +661,15 @@ unsafe impl<T: Sync> Sync for Stream<T> { }
 
 #[derive(Clone, Debug)]
 struct ReaderOptions {
-    skip_unknown_fields: bool,
+    unknown_fields: UnknownFieldHandling,
+    registry: Option<&'static ExtensionRegistry>,
 }
 
 impl Default for ReaderOptions {
     fn default() -> Self {
         ReaderOptions {
-            skip_unknown_fields: false
+            unknown_fields: UnknownFieldHandling::Store,
+            registry: None
         }
     }
 }
@@ -677,16 +680,38 @@ pub struct Builder {
     options: ReaderOptions
 }
 
+/// Handling options for unknown fields
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnknownFieldHandling {
+    /// Stores unknown fields in a message's `UnknownFieldSet`
+    Store,
+    /// Skips unknown fields when they're encounted
+    Skip,
+}
+
+impl UnknownFieldHandling {
+    /// Returns whether the handling is set to skip unknown fields
+    pub fn skip(self) -> bool {
+        self == UnknownFieldHandling::Skip
+    }
+}
+
 impl Builder {
     /// Creates a new builder with the default configuration
     #[inline]
     pub fn new() -> Self {
         Default::default()
     }
-    /// Sets whether unknown field sets should skip unknown fields
+    /// Sets unknown field handling for the reader
     #[inline]
-    pub fn skip_unknown_fields(mut self, value: bool) -> Self {
-        self.options.skip_unknown_fields = value;
+    pub fn unknown_fields(mut self, value: UnknownFieldHandling) -> Self {
+        self.options.unknown_fields = value;
+        self
+    }
+    /// Sets the registry extendable messages should use when being created
+    #[inline]
+    pub fn registry(mut self, registry: Option<&'static ExtensionRegistry>) -> Self {
+        self.options.registry = registry;
         self
     }
     /// Constructs a [`CodedReader`](struct.CodedReader.html) using this builder and 
@@ -1068,9 +1093,14 @@ impl<'a> CodedReader<Slice<'a>> {
 }
 
 impl<T: Input> CodedReader<T> {
-    /// Gets whether unknown fields should be skipped instead of stored.
-    pub fn skip_unknown_fields(&self) -> bool {
-        self.options.skip_unknown_fields
+    /// Gets handling options for unknown fields read with this reader.
+    pub fn unknown_field_handling(&self) -> UnknownFieldHandling {
+        self.options.unknown_fields
+    }
+    /// Gets the registry extendable messages should be created with when
+    /// reading from this reader.
+    pub fn registry(&self) -> Option<&'static ExtensionRegistry> {
+        self.options.registry
     }
     /// Gets the last tag read by the reader.
     pub fn last_tag(&self) -> Option<Tag> {

@@ -3,7 +3,7 @@
 use alloc::borrow::{Borrow, Cow, ToOwned};
 use alloc::boxed::Box;
 use core::any::TypeId;
-use core::fmt::Debug;
+use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 use core::mem;
 use crate::Mergable;
@@ -334,6 +334,7 @@ impl<T, V, D> Extension<T, V, D>
     }
 }
 
+/// An extension identifier for accessing a repeated extension value from an `ExtensionSet`
 pub struct RepeatedExtension<T, V: Wrapper> {
     t: PhantomData<fn(T) -> RepeatedField<V::Inner>>,
     tag: Tag
@@ -425,20 +426,36 @@ impl ExtensionRegistry {
     }
 }
 
+impl Debug for ExtensionRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.by_num.keys().fmt(f)
+    }
+}
+
 /// A builder used to construct extension registries in generated code
 pub struct RegistryBuilder {
     by_num: HashMap<FieldNumber, &'static dyn ExtensionIdentifier>,
 }
 
 impl RegistryBuilder {
+    /// Creates a new registry builder for building an extension registry
     #[inline]
     pub fn new() -> Self {
         RegistryBuilder { by_num: Default::default() }
     }
+    /// Adds the extensions in the specified registry to this registry
     #[inline]
     pub fn add_registry(mut self, registry: &'static ExtensionRegistry) -> Result<Self, ExtensionConflict> {
-        unimplemented!()
+        for (&num, &id) in &registry.by_num {
+            match self.by_num.insert(num, id) {
+                Some(_) => return Err(ExtensionConflict(num)),
+                None => { }
+            }
+        }
+
+        Ok(self)
     }
+    /// Adds an extension identifier to this registry
     #[inline]
     pub fn add_identifier(mut self, id: &'static dyn ExtensionIdentifier) -> Result<Self, ExtensionConflict> {
         let num = id.tag().number();
@@ -447,14 +464,17 @@ impl RegistryBuilder {
             None => Ok(self)
         }
     }
+    /// Returns the extension registry
     #[inline]
     pub fn build(self) -> ExtensionRegistry {
         ExtensionRegistry { by_num: self.by_num }
     }
 }
 
+/// An error returned when two extensions are added to a registry builder that use the same field number
 pub struct ExtensionConflict(FieldNumber);
 
+/// A set of extension values that can be accessed by using generated extension identifiers
 pub struct ExtensionSet<T: ExtendableMessage> {
     t: PhantomData<fn(T)>,
     registry: Option<&'static ExtensionRegistry>,
@@ -466,13 +486,15 @@ impl<T: ExtendableMessage + 'static> ExtensionSet<T> {
         self.registry.map_or(false, |r| r.contains(extension))
     }
 
-    /// Returns a new extension set for this specified message
+    /// Returns a new set for this specified message
     pub fn new() -> Self {
         Default::default()
     }
+    /// Returns the registry in use by the set
     pub fn registry(&self) -> Option<&'static ExtensionRegistry> {
         self.registry
     }
+    /// Returns if the registry contained in this set is equal to the 
     pub fn has_registry(&self, registry: Option<&'static ExtensionRegistry>) -> bool {
         match (self.registry(), registry) {
             (Some(r), Some(o)) => core::ptr::eq(r, o),
@@ -520,6 +542,7 @@ impl<T: ExtendableMessage + 'static> ExtensionSet<T> {
         self.value(extension).map(|v| v.borrow()).or(extension.default.as_ref().map(|v| v.borrow()))
     }
 
+    /// Returns a Field which can be used to modify an extension value
     pub fn field<'a, 'e, U: 'e + ExtensionType<Extended = T>>(&'a mut self, extension: &'e U) -> Option<Field<'a, 'e, U>> {
         if self.registry_contains(extension) {
             match self.by_num.entry(extension.tag().number()) {
@@ -618,6 +641,7 @@ pub enum Field<'a, 'e, T: 'e> {
 }
 
 impl<'a, 'e, T: 'e + ExtensionType> Field<'a, 'e, T> {
+    /// Inserts a default value into the field, returning a mutable reference to the value
     pub fn or_insert(self, default: T::Value) -> &'a mut T::Value {
         match self {
             Field::Occupied(entry) => entry.into_mut(),
@@ -625,6 +649,8 @@ impl<'a, 'e, T: 'e + ExtensionType> Field<'a, 'e, T> {
         }
     }
 
+    /// Returns a mutable reference to the value, calling the specified function to 
+    /// create the value and insert it if it does not exist.
     pub fn or_insert_with<F: FnOnce() -> T::Value>(self, default: F) -> &'a mut T::Value {
         match self {
             Field::Occupied(entry) => entry.into_mut(),
@@ -632,6 +658,8 @@ impl<'a, 'e, T: 'e + ExtensionType> Field<'a, 'e, T> {
         }
     }
 
+    /// Modifies an existing value in the field, doing nothing if the field is empty
+    /// and returns the Field.
     pub fn and_modify<F: FnOnce(&mut T::Value)>(mut self, f: F) -> Self {
         match self {
             Field::Occupied(ref mut entry) => f(entry.get_mut()),
@@ -642,46 +670,65 @@ impl<'a, 'e, T: 'e + ExtensionType> Field<'a, 'e, T> {
     }
 }
 
+/// Represents an occupied field in an extension set
 pub struct OccupiedField<'a, 'e, T: 'e> {
     extension: &'e T,
     entry: hash_map::OccupiedEntry<'a, FieldNumber, Box<dyn AnyExtension>, DefaultHashBuilder>,
 }
 
 impl<'a, 'e, T: 'e + ExtensionType> OccupiedField<'a, 'e, T> {
+    /// Gets the extension identifier for this field
+    pub fn extension(&self) -> &'e T {
+        self.extension
+    }
+
     /// Takes ownership of the value, removing it from the set
     pub fn remove(self) -> T::Value {
-        unimplemented!()
+        let raw = Box::into_raw(self.entry.remove());
+        let casted = unsafe { Box::from_raw(raw as *mut T::Entry) };
+        T::entry_value(*casted)
     }
 
     /// Gets a reference to the value in the field.
     pub fn get(&self) -> &T::Value {
-        unimplemented!()
+        let ptr = self.entry.get().as_ref() as *const dyn AnyExtension as *const T::Entry;
+        unsafe { (*ptr).as_ref() }
     }
 
     /// Gets a mutable reference to the value in the field.
     pub fn get_mut(&mut self) -> &mut T::Value {
-        unimplemented!()
+        let ptr = self.entry.get_mut().as_mut() as *mut dyn AnyExtension as *mut T::Entry;
+        unsafe { (*ptr).as_mut() }
     }
 
     /// Converts the field into a mutable reference to the value in the entry with a lifetime bound to the set.
     pub fn into_mut(self) -> &'a mut T::Value {
-        unimplemented!()
+        let ptr = self.entry.into_mut().as_mut() as *mut dyn AnyExtension as *mut T::Entry;
+        unsafe { (*ptr).as_mut() }
     }
 
     /// Sets the value of the field and returns the field's old value
     pub fn insert(&mut self, value: T::Value) -> T::Value {
-        unimplemented!()
+        core::mem::replace(self.get_mut(), value)
     }
 }
 
+/// Represents a field without a value in the set
 pub struct VacantField<'a, 'e, T: 'e> {
     extension: &'e T,
     entry: hash_map::VacantEntry<'a, FieldNumber, Box<dyn AnyExtension>, DefaultHashBuilder>,
 }
 
 impl<'a, 'e, T: 'e + ExtensionType> VacantField<'a, 'e, T> {
+    /// Gets the extension identifier for this field
+    pub fn extension(&self) -> &'e T {
+        self.extension
+    }
+    /// Inserts a value for the field, returning a mutable reference to the value
     pub fn insert(self, value: T::Value) -> &'a mut T::Value {
-        unimplemented!()
+        let borrow = self.entry.insert(Box::new(self.extension.new_entry(value)));
+        let ptr = borrow.as_mut() as *mut dyn AnyExtension as *mut T::Entry;
+        unsafe { (*ptr).as_mut() }
     }
 }
 

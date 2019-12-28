@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use core::convert::TryInto;
 use crate::{internal::Sealed, Message as TraitMessage};
+use crate::extend::ExtendableMessage;
 use crate::io::{self, read, write, WireType, ByteString, Length, LengthBuilder, CodedReader, CodedWriter, Input, Output};
 use trapper::{newtype, Wrapper};
 
@@ -426,8 +427,18 @@ impl<T: TraitMessage> Value for Message<T> {
     fn is_initialized(&self) -> bool {
         self.0.is_initialized()
     }
-    fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self> {
+    default fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self> {
         let mut t = Self::wrap(T::new());
+        t.merge_from(input)?;
+        Ok(t)
+    }
+}
+impl<T: TraitMessage + ExtendableMessage + 'static> Value for Message<T> {
+    fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self> {
+        let mut t = T::new();
+        t.extensions_mut().replace_registry(input.registry());
+
+        let mut t = Self::wrap(t);
         t.merge_from(input)?;
         Ok(t)
     }

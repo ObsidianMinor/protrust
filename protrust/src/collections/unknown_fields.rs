@@ -46,7 +46,7 @@ impl Mergable for UnknownFieldSet {
 impl FieldSet for UnknownFieldSet {
     #[inline]
     fn try_add_field_from<'a, T: Input>(&mut self, input: &'a mut CodedReader<T>) -> read::Result<TryRead<'a, T>> {
-        if input.skip_unknown_fields() || input.last_tag().map(Tag::wire_type) == Some(WireType::EndGroup) {
+        if input.unknown_field_handling().skip() || input.last_tag().map(Tag::wire_type) == Some(WireType::EndGroup) {
             Ok(TryRead::Yielded(input))
         } else {
             self.add_field_from(input)?;
@@ -152,9 +152,7 @@ impl UnknownFieldSet {
 impl UnknownFieldSet {
     /// Creates a new unknown field set in the specified allocator
     pub fn new() -> Self {
-        Self {
-            inner: Default::default(),
-        }
+        Default::default()
     }
     /// Gets the number of fields present in this set
     pub fn field_len(&self) -> usize {
