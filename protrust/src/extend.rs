@@ -494,7 +494,7 @@ impl<T: ExtendableMessage + 'static> ExtensionSet<T> {
     pub fn registry(&self) -> Option<&'static ExtensionRegistry> {
         self.registry
     }
-    /// Returns if the registry contained in this set is equal to the 
+    /// Returns if the registry contained in this set is equal to the provided registry
     pub fn has_registry(&self, registry: Option<&'static ExtensionRegistry>) -> bool {
         match (self.registry(), registry) {
             (Some(r), Some(o)) => core::ptr::eq(r, o),

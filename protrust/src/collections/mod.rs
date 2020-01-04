@@ -63,6 +63,7 @@ impl<'a, T: Input> TryRead<'a, T> {
     }
 }
 
+/// The type used by generated code to represent a repeated field.
 pub type RepeatedField<T> = alloc::vec::Vec<T>;
 
 impl<T> Sealed for RepeatedField<T> { }
@@ -132,6 +133,7 @@ impl<V: Clone> Mergable for RepeatedField<V> {
     }
 }
 
+/// The type used by generated code to represent a map field.
 pub type MapField<K, V> = hashbrown::HashMap<K, V>;
 
 const KEY_FIELD: FieldNumber = unsafe { FieldNumber::new_unchecked(1) };
@@ -224,7 +226,10 @@ impl<K, V> Mergable for hashbrown::HashMap<K, V>
 {
     fn merge(&mut self, other: &Self) {
         for (k, v) in other {
-            self.raw_entry_mut().from_key(k).and_modify(|_, e| e.merge(v)).or_insert_with(|| (k.clone(), v.clone()));
+            self.raw_entry_mut() // use a raw entry so we can defer the cloning of the key until we need it
+                .from_key(k)
+                .and_modify(|_, e| e.merge(v))
+                .or_insert_with(|| (k.clone(), v.clone()));
         }
     }
 }
