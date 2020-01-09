@@ -1,5 +1,6 @@
 //! An abstraction around input and output types that allows the lib to work in `no-std` scenarios.
 
+#[cfg(not(feature = "std"))]
 use core::cmp;
 use core::fmt::{self, Display, Formatter};
 
@@ -37,21 +38,13 @@ pub trait Read {
     /// The input buffer is not guaranteed to be zeroed.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
 
+    /// Reads from the input into the specified buffer until the buffer is filled.
+    /// The input buffer is not guaranteed to be zeroed.
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
+
     /// Skips a certain number of bytes from the input. If instance cannot skip the specified length,
     /// this should return an [`Error`](struct.Error.html)
-    fn skip(&mut self, mut len: usize) -> Result<()> {
-        const BUF_SIZE: usize = 2 * 1024;
-
-        let mut buf = [0; BUF_SIZE];
-        while len != 0 {
-            let amnt = cmp::min(len, buf.len());
-            match self.read(&mut buf[..amnt]) {
-                Ok(0) | Err(Error) => return Err(Error),
-                Ok(read_len) => len -= read_len,
-            }
-        }
-        Ok(())
-    }
+    fn skip(&mut self, len: usize) -> Result<()>;
 }
 
 #[cfg(not(feature = "std"))]
@@ -59,6 +52,9 @@ impl<R: Read + ?Sized> Read for &mut R {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         (**self).read(buf)
+    }
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        (**self).read_exact(buf)
     }
     #[inline]
     fn skip(&mut self, len: usize) -> Result<()> {
@@ -78,6 +74,25 @@ impl<T: ?Sized + std::io::Read> Read for T {
             }
         }
     }
+    fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {
+        unsafe { self.initializer().initialize(buf); }
+        loop {
+            match self.read(buf) {
+                Ok(0) if buf.is_empty() => break Err(Error),
+                Ok(0) => break Ok(()),
+                Ok(n) => { let tmp = buf; buf = &mut tmp[n..]; }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => { },
+                Err(_) => break Err(Error),
+            }
+        }
+    }
+    fn skip(&mut self, len: usize) -> Result<()> {
+        let mut by_ref = self;
+        let mut take = <&mut T as std::io::Read>::take(&mut by_ref, len as u64);
+        let mut sink = std::io::sink();
+        std::io::copy(&mut take, &mut sink).map_err(|_| Error)?;
+        Ok(())
+    }
 }
 
 #[cfg(not(feature = "std"))]
@@ -95,6 +110,15 @@ impl<'a> Read for &'a [u8] {
 
         *self = b;
         Ok(amt)
+    }
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        match self.get(..buf.len()) {
+            Some(input) => {
+                buf.copy_from_slice(input);
+                Ok(())
+            },
+            None => Err(Error)
+        }
     }
     fn skip(&mut self, len: usize) -> Result<()> {
         if len > self.len() {
