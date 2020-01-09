@@ -7,6 +7,11 @@
 #![feature(new_uninit)]
 #![feature(manually_drop_take)]
 #![feature(matches_macro)]
+#![feature(const_if_match)]
+#![feature(slice_ptr_range)]
+#![feature(bool_to_option)]
+#![feature(vec_drain_as_slice)]
+#![feature(exact_size_is_empty)]
 
 #![warn(missing_docs)]
 
