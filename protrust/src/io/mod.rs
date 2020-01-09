@@ -70,8 +70,8 @@ impl WireType {
     /// Gets whether a wire type is eligible for repeated field packing.
     /// The valid packable wire types are Bit32, Bit64, and Varint.
     pub const fn is_packable(self) -> bool {
-        (self as u8 == WireType::Varint as u8) |
-        (self as u8 == WireType::Bit64 as u8) |
+        (self as u8 == WireType::Varint as u8) ||
+        (self as u8 == WireType::Bit64 as u8) ||
         (self as u8 == WireType::Bit32 as u8)
     }
 }
