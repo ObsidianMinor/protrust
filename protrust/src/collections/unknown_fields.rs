@@ -7,6 +7,8 @@
 
 use alloc::boxed::Box;
 use alloc::vec::{self, Vec};
+use core::fmt::{self, Formatter, Debug};
+use core::iter::FusedIterator;
 use core::ops::RangeBounds;
 use crate::{internal::Sealed, Mergable};
 use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter, Input, Output};
@@ -38,8 +40,8 @@ pub struct UnknownFieldSet {
 impl Sealed for UnknownFieldSet { }
 impl Mergable for UnknownFieldSet {
     fn merge(&mut self, other: &Self) {
-        for (key, values) in &other.inner {
-            self.inner.entry(*key).or_insert_with(Vec::new).extend(values.iter().cloned())
+        for (&key, values) in &other.inner {
+            self.inner.entry(key).or_insert_with(Vec::new).extend(values.clone())
         }
     }
 }
@@ -56,35 +58,35 @@ impl FieldSet for UnknownFieldSet {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         self.inner
             .iter()
-            .try_fold(builder, |builder, (key, values)| 
+            .try_fold(builder, |builder, (&key, values)| 
                 values
                     .iter()
                     .try_fold(builder, |builder, value| {
                         match value {
                             UnknownField::Varint(v) => {
                                 builder
-                                    .add_tag(Tag::new(*key, WireType::Varint))?
+                                    .add_tag(Tag::new(key, WireType::Varint))?
                                     .add_value::<raw::Uint64>(v)
                             },
                             UnknownField::Bit64(v) => {
                                 builder
-                                    .add_tag(Tag::new(*key, WireType::Bit64))?
+                                    .add_tag(Tag::new(key, WireType::Bit64))?
                                     .add_value::<raw::Fixed64>(v)
                             },
                             UnknownField::LengthDelimited(v) => {
                                 builder
-                                    .add_tag(Tag::new(*key, WireType::LengthDelimited))?
+                                    .add_tag(Tag::new(key, WireType::LengthDelimited))?
                                     .add_value::<raw::Bytes<_>>(v)
                             },
                             UnknownField::Group(v) => {
                                 builder
-                                    .add_tag(Tag::new(*key, WireType::StartGroup))?
+                                    .add_tag(Tag::new(key, WireType::StartGroup))?
                                     .add_fields(v)?
-                                    .add_tag(Tag::new(*key, WireType::EndGroup))
+                                    .add_tag(Tag::new(key, WireType::EndGroup))
                             },
                             UnknownField::Bit32(v) => {
                                 builder
-                                    .add_tag(Tag::new(*key, WireType::Bit32))?
+                                    .add_tag(Tag::new(key, WireType::Bit32))?
                                     .add_value::<raw::Fixed32>(v)
                             }
                         }
@@ -205,10 +207,52 @@ impl UnknownFieldSet {
 }
 
 /// An iterator over the fields of an unknown field set.
+#[derive(Clone, Debug)]
 pub struct Iter<'a>(hash_map::Iter<'a, FieldNumber, Vec<UnknownField>>);
 
+impl<'a> Iterator for Iter<'a> {
+    type Item = (FieldNumber, &'a [UnknownField]);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(&n, v)| (n, v.as_slice()))
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+impl ExactSizeIterator for Iter<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+impl FusedIterator for Iter<'_> { }
+
 /// A mutable iterator over the fields of an unknown field set.
+#[derive(Debug)]
 pub struct IterMut<'a>(hash_map::IterMut<'a, FieldNumber, Vec<UnknownField>>);
+
+impl<'a> Iterator for IterMut<'a> {
+    type Item = (FieldNumber, &'a mut [UnknownField]);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(&n, v)| (n, v.as_mut_slice()))
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+impl ExactSizeIterator for IterMut<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+impl FusedIterator for IterMut<'_> { }
 
 /// An iterator over the field numbers present in this set.
 /// 
@@ -217,7 +261,28 @@ pub struct IterMut<'a>(hash_map::IterMut<'a, FieldNumber, Vec<UnknownField>>);
 /// 
 /// [`field_numbers`]: struct.UnknownFieldSet.html#method.field_numbers
 /// [`UnknownFieldSet`]: struct.UnknownFieldSet.html
+#[derive(Debug, Clone)]
 pub struct FieldNumbers<'a>(hash_map::Keys<'a, FieldNumber, Vec<UnknownField>>);
+
+impl Iterator for FieldNumbers<'_> {
+    type Item = FieldNumber;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|&n| n)
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+impl ExactSizeIterator for FieldNumbers<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+impl FusedIterator for FieldNumbers<'_> { }
 
 /// A draining iterator that returns each field along with a boxed slice of unknown fields.
 /// 
@@ -226,7 +291,28 @@ pub struct FieldNumbers<'a>(hash_map::Keys<'a, FieldNumber, Vec<UnknownField>>);
 /// 
 /// [`drain`]: struct.UnknownFieldSet.html#method.drain
 /// [`UnknownFieldSet`]: struct.UnknownFieldSet.html
+#[derive(Debug)]
 pub struct Drain<'a>(hash_map::Drain<'a, FieldNumber, Vec<UnknownField>>);
+
+impl Iterator for Drain<'_> {
+    type Item = (FieldNumber, Box<[UnknownField]>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(n, v)| (n, v.into_boxed_slice()))
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+impl ExactSizeIterator for Drain<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+impl FusedIterator for Drain<'_> { }
 
 /// A draining iterator that returns the unknown fields for a single field.
 /// 
@@ -236,6 +322,49 @@ pub struct Drain<'a>(hash_map::Drain<'a, FieldNumber, Vec<UnknownField>>);
 /// [`drain_field`]: struct.UnknownFieldSet.html#method.drain_field
 /// [`UnknownFieldSet`]: struct.UnknownFieldSet.html
 pub struct FieldDrain<'a>(Option<vec::Drain<'a, UnknownField>>);
+
+impl Debug for FieldDrain<'_> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self.0 {
+            Some(drain) => {
+                f.debug_tuple("FieldDrain")
+                 .field(&drain.as_slice())
+                 .finish()
+            },
+            None => {
+                f.debug_tuple("FieldDrain")
+                 .field(&[] as &[UnknownField; 0])
+                 .finish()
+            }
+        }
+    }
+}
+
+impl Iterator for FieldDrain<'_> {
+    type Item = UnknownField;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.as_mut().and_then(<_>::next)
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.as_ref().map_or((0, Some(0)), <_>::size_hint)
+    }
+}
+impl DoubleEndedIterator for FieldDrain<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<UnknownField> {
+        self.0.as_mut().and_then(<_>::next_back)
+    }
+}
+impl ExactSizeIterator for FieldDrain<'_> {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.0.as_ref().map_or(true, <_>::is_empty)
+    }
+}
+impl FusedIterator for FieldDrain<'_> { }
 
 #[cfg(test)]
 mod test {
