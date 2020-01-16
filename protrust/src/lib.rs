@@ -38,13 +38,13 @@ pub use collections::unknown_fields::UnknownFieldSet;
 
 /// A message value.
 pub trait Message: Sized {
-    /// Merges this message with data from the [`CodedRead`](io/read/trait.CodedRead.html) of the specified type.
+    /// Merges this message with data from the [`CodedReader`](io/read/struct.CodedReader.html) of the specified type.
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()>;
     /// Adds the size of the data in the message to the [`LengthBuilder`](io/struct.LengthBuilder.html)
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
-    /// Writes this message's data to the [`CodedWrite`](io/write/struct.CodedWrite.html) of the specified type.
+    /// Writes this message's data to the [`CodedWriter`](io/write/struct.CodedWriter.html) of the specified type.
     fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result;
-    /// Returns if the message value is initialized
+    /// Returns whether the message value is initialized
     fn is_initialized(&self) -> bool;
 
     /// Gets a shared reference to the unknown fields in this message

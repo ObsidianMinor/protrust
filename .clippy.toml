@@ -1,0 +1,2 @@
+# We use some complex types here, this gives us a little more wiggle room
+type-complexity-threshold = 450

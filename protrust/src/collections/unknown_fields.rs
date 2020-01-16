@@ -177,11 +177,11 @@ impl UnknownFieldSet {
         self.inner.get_mut(&num).and_then(Vec::pop)
     }
     /// Returns an iterator of all of the fields in the set
-    pub fn fields<'a>(&'a self) -> Iter<'a> {
+    pub fn fields(&self) -> Iter {
         Iter(self.inner.iter())
     }
     /// Returns a mutable iterator of all the fields in the set
-    pub fn fields_mut<'a>(&'a mut self) -> IterMut<'a> {
+    pub fn fields_mut(&mut self) -> IterMut {
         IterMut(self.inner.iter_mut())
     }
     /// Clears the set, removing all fields
@@ -193,15 +193,15 @@ impl UnknownFieldSet {
         self.inner.remove(&num);
     }
     /// Gets an iterator of all fields by their field number
-    pub fn field_numbers<'a>(&'a self) -> FieldNumbers<'a> {
+    pub fn field_numbers(&self) -> FieldNumbers {
         FieldNumbers(self.inner.keys())
     }
     /// Clears the set, returning the owned field values
-    pub fn drain<'a>(&'a mut self) -> Drain<'a> {
+    pub fn drain(&mut self) -> Drain {
         Drain(self.inner.drain())
     }
     /// Drains a range of values from a field
-    pub fn drain_values<'a, R: RangeBounds<usize>>(&'a mut self, num: FieldNumber, range: R) -> FieldDrain<'a> {
+    pub fn drain_values<R: RangeBounds<usize>>(&mut self, num: FieldNumber, range: R) -> FieldDrain {
         FieldDrain(self.inner.get_mut(&num).map(|v| v.drain(range)))
     }
 }
@@ -269,7 +269,7 @@ impl Iterator for FieldNumbers<'_> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|&n| n)
+        self.0.next().copied()
     }
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {

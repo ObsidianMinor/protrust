@@ -171,7 +171,7 @@ mod internal {
         fn skip_bit64(&mut self) -> Result<()>;
         fn skip_length_delimited(&mut self) -> Result<()>;
 
-        fn as_any<'a>(&'a mut self) -> Any<'a>;
+        fn as_any(&mut self) -> Any;
         fn from_any<'a>(&'a mut self, any: Any<'a>);
 
         fn reached_end(&self) -> bool;
@@ -244,8 +244,7 @@ mod internal {
                 let remaining_limit = *limit as usize;
                 if remaining_limit == 0 {
                     Err(stream::Error.into())
-                } else
-                if remaining_limit >= buf.len() {
+                } else if remaining_limit >= buf.len() {
                     *limit = i32::wrapping_sub(*limit, buf.len() as i32);
                     stream.read_exact(buf).map_err(Into::into)
                 } else {
@@ -287,28 +286,26 @@ mod internal {
 
             if self.buffer.to_limit_len() != 0 {
                 unsafe { Ok(Some(self.buffer.next_byte())) }
+            } else if self.remaining_limit == 0 {
+                Ok(None)
             } else {
-                if self.remaining_limit == 0 {
-                    Ok(None)
-                } else {
-                    match self.stream {
-                        Some((ref mut src, [])) => {
-                            let mut buf = [0u8; 1];
-                            let result = src.read(&mut buf)?;
-                            if result != 0 {
-                                if self.remaining_limit > 0 {
-                                    self.remaining_limit -= 1;
-                                }
-                                Ok(Some(buf[0]))
-                            } else {
-                                Ok(None)
+                match self.stream {
+                    Some((ref mut src, [])) => {
+                        let mut buf = [0u8; 1];
+                        let result = src.read(&mut buf)?;
+                        if result != 0 {
+                            if self.remaining_limit > 0 {
+                                self.remaining_limit -= 1;
                             }
-                        },
-                        _ => {
-                            self.try_refresh()
-                                .map(|b| b.then(|| unsafe { self.buffer.next_byte() }))
-                                .map_err(Into::into)
+                            Ok(Some(buf[0]))
+                        } else {
+                            Ok(None)
                         }
+                    },
+                    _ => {
+                        self.try_refresh()
+                            .map(|b| b.then(|| unsafe { self.buffer.next_byte() }))
+                            .map_err(Into::into)
                     }
                 }
             }
@@ -320,7 +317,7 @@ mod internal {
 
             let mut remaining_slice = self.read_buffer_partial(slice)?;
 
-            if remaining_slice.len() != 0 {
+            if !remaining_slice.is_empty() {
                 if let Some((ref mut src, ref buf)) = self.stream {
                     // if the remaining amnt to read is more than or equal to
                     // the size of the buffer then we read direct from the stream
@@ -395,8 +392,7 @@ mod internal {
                     // we fail this check if our remaining limit is less than
                     // the new limit
                     r < 0
-                } else
-                if self.stream.is_none() {
+                } else if self.stream.is_none() {
                     // we also fail if we're reading directly from a buffer and
                     // the size of the buffer is less than the limit
                     match i32::try_from(self.buffer.to_end_len()) {
@@ -734,8 +730,7 @@ impl Reader for Slice<'_> {
                 }
             }
             Err(Error::MalformedVarint)
-        } else
-        if let Some::<&[u8; 5]>(arr) = self.buffer.try_limited_as_array() {
+        } else if let Some::<&[u8; 5]>(arr) = self.buffer.try_limited_as_array() {
             for (i, &b) in arr.iter().enumerate() {
                 result |= ((b & 0x7f) as u32) << (7 * i);
                 if b < 0x80 {
@@ -788,7 +783,7 @@ impl Reader for Slice<'_> {
     }
     fn read_bit32(&mut self) -> Result<u32> {
         self.buffer.try_limited_as_array()
-            .ok_or(stream::Error.into())
+            .ok_or(Error::StreamError(stream::Error))
             .map(|&arr| arr)
             .map(|arr| {
                 unsafe { self.buffer.advance(4); } // since we already got the array, we know we have at least 4 bytes
@@ -797,7 +792,7 @@ impl Reader for Slice<'_> {
     }
     fn read_bit64(&mut self) -> Result<u64> {
         self.buffer.try_limited_as_array()
-            .ok_or(stream::Error.into())
+            .ok_or(Error::StreamError(stream::Error))
             .map(|&arr| arr)
             .map(|arr| {
                 unsafe { self.buffer.advance(8); } // since we already got the array, we know we have at least 8 bytes
@@ -872,7 +867,7 @@ impl Reader for Slice<'_> {
         }
     }
 
-    fn as_any<'a>(&'a mut self) -> Any<'a> {
+    fn as_any(&mut self) -> Any {
         Any {
             stream: None,
             remaining_limit: 0,
@@ -935,7 +930,7 @@ impl<T: Read> Stream<T> {
         Ok(refreshed)
     }
     fn refresh(&mut self) -> Result<()> {
-        self.try_refresh().and_then(|b| b.then_some(()).ok_or(stream::Error.into()))
+        self.try_refresh().and_then(|b| b.then_some(()).ok_or(Error::StreamError(stream::Error)))
     }
     fn read_buffer_partial<'a>(&mut self, slice: &'a mut [u8]) -> Result<&'a mut [u8]> {
         // check if we reached the end of the buffer
@@ -959,7 +954,7 @@ impl<T: Read> Stream<T> {
         } else {
             let (f, s) = slice.split_at_mut(cmp::min(limit_len, slice.len()));
 
-            if f.len() != 0 {
+            if !f.is_empty() {
                 unsafe {
                     self.buffer.copy_nonoverlapping(f);
                 }
@@ -975,8 +970,7 @@ impl<T: Read> Stream<T> {
             let remaining_limit = self.remaining_limit as usize;
             if remaining_limit == 0 {
                 Err(stream::Error.into())
-            } else
-            if remaining_limit >= buf.len() {
+            } else if remaining_limit >= buf.len() {
                 self.remaining_limit = i32::wrapping_sub(self.remaining_limit, buf.len() as i32);
                 self.input.read_exact(buf).map_err(Into::into)
             } else {
@@ -992,7 +986,7 @@ impl<T: Read> Stream<T> {
         }
 
         let mut remaining_slice = self.read_buffer_partial(slice)?;
-        if remaining_slice.len() != 0 {
+        if !remaining_slice.is_empty() {
             // if the remaining amnt to read is more than or equal to
             // the size of the buffer then we read direct from the stream
             // and adjust our remaining limit accordingly
@@ -1055,26 +1049,22 @@ impl<T: Read> Stream<T> {
 
         if self.buffer.to_limit_len() != 0 {
             unsafe { Ok(Some(self.buffer.next_byte())) }
+        } else if self.remaining_limit == 0 {
+            Ok(None)
+        } else if self.buf.len() != 0 {
+            self.try_refresh()
+                .map(|b| b.then(|| unsafe { self.buffer.next_byte() }))
+                .map_err(Into::into)
         } else {
-            if self.remaining_limit == 0 {
-                Ok(None)
-            } else {
-                if self.buf.len() != 0 {
-                    self.try_refresh()
-                        .map(|b| b.then(|| unsafe { self.buffer.next_byte() }))
-                        .map_err(Into::into)
-                } else {
-                    let mut buf = [0u8; 1];
-                    let result = self.input.read(&mut buf)?;
-                    if result != 0 {
-                        if self.remaining_limit > 0 {
-                            self.remaining_limit -= 1;
-                        }
-                        Ok(Some(buf[0]))
-                    } else {
-                        Ok(None)
-                    }
+            let mut buf = [0u8; 1];
+            let result = self.input.read(&mut buf)?;
+            if result != 0 {
+                if self.remaining_limit > 0 {
+                    self.remaining_limit -= 1;
                 }
+                Ok(Some(buf[0]))
+            } else {
+                Ok(None)
             }
         }
     }
@@ -1216,7 +1206,7 @@ impl<T: Read> Reader for Stream<T> {
         }
     }
 
-    fn as_any<'a>(&'a mut self) -> Any<'a> {
+    fn as_any(&mut self) -> Any {
         Any {
             stream: Some((&mut self.input, &mut self.buf)),
             remaining_limit: self.remaining_limit,
@@ -1510,7 +1500,7 @@ impl<T: Input> CodedReader<T> {
     }
     /// Returns an [`AnyConverter`] that can be used to temporarily 
     /// convert the reader into a non-generic reader over [`Any`] input.
-    pub fn as_any<'a>(&'a mut self) -> AnyConverter<'a, T> {
+    pub fn as_any(&mut self) -> AnyConverter<T> {
         AnyConverter::new(self)
     }
 
@@ -1590,7 +1580,7 @@ impl<T: Input> CodedReader<T> {
     }
 
     /// Reads a field value. This offloads checking of the tag's value, making it faster when reading
-    /// many fields when the tag's underlying value already exists in code.
+    /// many fields when the tag's underlying value already exists as a constant.
     #[inline]
     pub fn read_field<'a>(&'a mut self) -> Result<Option<FieldReader<'a, T>>> {
         self.inner.read_tag().map(move |t| t.map(move |t| FieldReader { inner: self, tag: t }))

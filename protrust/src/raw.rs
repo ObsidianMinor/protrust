@@ -16,13 +16,13 @@ pub trait Value: Sized + Sealed {
     /// Calculates the size of the value as encoded on the wire
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
 
-    /// Merges the value with the [`CodedRead`](../io/read/struct.CodedRead.html)
+    /// Merges the value with the [`CodedReader`](../io/read/struct.CodedReader.html)
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()>;
 
-    /// Writes the value to the [`CodedWrite`](../io/write/struct.CodedWrite.html)
+    /// Writes the value to the [`CodedWriter`](../io/write/struct.CodedWriter.html)
     fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result;
 
-    /// Returns if the value is initialized, that is, if all the required fields in the value are set.
+    /// Returns whether the value is initialized, that is, if all the required fields in the value are set.
     fn is_initialized(&self) -> bool;
 
     /// Reads a new instance of the value
@@ -33,6 +33,8 @@ pub trait ConstSized: Value {
     /// The constant size of the value
     const SIZE: Length;
 }
+
+const MAX_VARINT64_SIZE: Length = unsafe { Length::new_unchecked(10) };
 
 newtype! {
     /// A varint encoded 32-bit value. Negative values are encoded as 10-byte varints.
@@ -47,7 +49,7 @@ impl Value for Int32 {
         if self.0 >= 0 {
             builder.add_bytes(io::raw_varint32_size(self.0 as u32))
         } else {
-            builder.add_bytes(unsafe { Length::new_unchecked(10) })
+            builder.add_bytes(MAX_VARINT64_SIZE)
         }
     }
     fn merge_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
