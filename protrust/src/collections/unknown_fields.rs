@@ -325,7 +325,7 @@ pub struct FieldDrain<'a>(Option<vec::Drain<'a, UnknownField>>);
 
 impl Debug for FieldDrain<'_> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self.0 {
+        match &self.0 {
             Some(drain) => {
                 f.debug_tuple("FieldDrain")
                  .field(&drain.as_slice())
