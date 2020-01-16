@@ -257,7 +257,7 @@ impl<V> ValuesSize<V> for RepeatedField<V::Inner>
         let len: i32 = self.len().try_into().ok()?;
 
         #[cfg(feature = "checked_size")]
-        return builder.add_bytes(len.checked_mul(size)?);
+        return builder.add_bytes(unsafe { Length::new_unchecked(len.checked_mul(size.get())?) });
 
         #[cfg(not(feature = "checked_size"))]
         return builder.add_bytes(Length::new(len * size.get())?);
