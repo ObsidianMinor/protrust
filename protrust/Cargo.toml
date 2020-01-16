@@ -10,10 +10,6 @@ std = []
 # use checked addition when calculating value sizes
 checked_size = []
 
-[[bench]]
-name = "io"
-harness = false
-
 [dependencies]
 trapper = "2.0"
 ahash = "0.2"
@@ -21,6 +17,3 @@ ahash = "0.2"
 [dependencies.hashbrown]
 version = "0.6"
 features = ["nightly"]
-
-[dev-dependencies]
-criterion = "0.3"
