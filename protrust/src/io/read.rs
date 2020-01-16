@@ -2,16 +2,14 @@
 
 use alloc::boxed::Box;
 use alloc::string::FromUtf8Error;
-use core::cmp;
-use core::convert::{TryFrom, TryInto};
+use core::cmp::{self, Ordering};
+use core::convert::TryFrom;
 use core::fmt::{self, Display, Formatter};
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
-use core::num::NonZeroUsize;
 use core::ops;
 use core::ptr::NonNull;
 use core::result;
-use core::slice;
 use crate::collections::{RepeatedValue, FieldSet, TryRead};
 use crate::extend::ExtensionRegistry;
 use crate::io::{Tag, WireType, ByteString, stream::{self, Read}};
@@ -24,11 +22,140 @@ use std::error;
 const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
 mod internal {
+    use core::cmp::Ordering;
+    use core::convert::TryFrom;
+    use core::ops::Range;
+    use core::ptr::{self, NonNull};
     use core::result;
-    use crate::io::{ByteString, stream, read::{Result, Any}};
+    use crate::io::{ByteString, Length, internal::Array, stream::{self, Read}, read::{Result, Error}};
+
+    /// A container for shared buffer manipulation logic.
+    /// This does not track the lifetime of the buffer,
+    /// so caution must by used when using or moving it.
+    #[derive(Copy, Clone)]
+    pub struct Buffer {
+        start: NonNull<u8>,
+        limit: NonNull<u8>,
+        /// With no limit, this is None and the limit is the end
+        end: Option<NonNull<u8>>,
+    }
+
+    impl Buffer {
+        #[inline]
+        pub fn from_slice(s: &[u8]) -> Self {
+            let Range { start, end } = s.as_ptr_range();
+            unsafe {
+                Self {
+                    start: NonNull::new_unchecked(start as _),
+                    limit: NonNull::new_unchecked(end as _),
+                    end: None
+                }
+            }
+        }
+        #[inline]
+        pub fn to_limit_len(&self) -> usize {
+            usize::wrapping_sub(self.limit.as_ptr() as _, self.start.as_ptr() as _)
+        }
+        #[inline]
+        pub fn to_end_len(&self) -> usize {
+            match self.end {
+                Some(p) => usize::wrapping_sub(p.as_ptr() as _, self.start.as_ptr() as _),
+                None => self.to_limit_len()
+            }
+        }
+        #[inline]
+        pub unsafe fn to_limit_as_slice<'a>(&self) -> &'a [u8] {
+            core::slice::from_raw_parts(self.start.as_ptr() as _, self.to_limit_len())
+        }
+        #[inline]
+        pub unsafe fn to_end_as_slice<'a>(&self) -> &'a [u8] {
+            core::slice::from_raw_parts(self.start.as_ptr() as _, self.to_end_len())
+        }
+        #[inline]
+        pub unsafe fn advance(&mut self, amnt: usize) {
+            let new_pos = self.start.as_ptr().add(amnt);
+
+            debug_assert!(new_pos <= self.limit.as_ptr());
+
+            self.start = NonNull::new_unchecked(new_pos);
+        }
+        #[inline]
+        pub fn reached_limit(&self) -> bool {
+            self.start == self.limit
+        }
+        #[inline]
+        pub fn has_limit(&self) -> bool {
+            self.end.is_some()
+        }
+        #[inline]
+        pub fn remaining_limit(&self) -> Option<i32> {
+            self.has_limit().then(|| self.to_limit_len() as i32)
+        }
+        #[inline]
+        pub fn reached_end(&self) -> bool {
+            self.reached_limit() && !self.has_limit()
+        }
+        #[inline]
+        pub unsafe fn peek_byte(&self) -> u8 {
+            *self.start.as_ref()
+        }
+        #[inline]
+        pub unsafe fn next_byte(&mut self) -> u8 {
+            let b = self.peek_byte();
+            self.advance(1);
+            b
+        }
+        #[inline]
+        pub unsafe fn copy_nonoverlapping(&mut self, slice: &mut [u8]) {
+            ptr::copy_nonoverlapping(self.start.as_ref(), slice.as_mut_ptr(), slice.len());
+            self.advance(slice.len());
+        }
+        /// Applies a limit to the buffer, returning a remainder for 
+        /// any bytes that couldn't be limited. Assumes that:
+        /// 
+        ///  1. Limit does not extend beyond an existing limit
+        /// 
+        ///  2. Limit is not negative
+        #[inline]
+        pub unsafe fn apply_partial_limit(&mut self, limit: i32) -> i32 {
+            let (limit, remainder) = 
+                match i32::try_from(self.to_end_len()) {
+                    Ok(len) if len < limit => (len, limit - len),
+                    _ => (limit, 0)
+                };
+            self.apply_limit(limit);
+            remainder
+        }
+        /// Applies a limit to the buffer. Assumes that:
+        /// 
+        ///  1. Limit does not extend beyond the end of the buffer
+        /// 
+        ///  2. Limit does not extend beyond an existing limit
+        /// 
+        ///  3. Limit is not negative
+        #[inline]
+        pub unsafe fn apply_limit(&mut self, limit: i32) {
+            if self.end.is_none() {
+                self.end = Some(self.limit);
+            }
+            self.limit = NonNull::new_unchecked(self.start.as_ptr().add(limit as usize));
+        }
+        #[inline]
+        pub unsafe fn remove_limit(&mut self) {
+            self.limit = self.end.take().unwrap();
+        }
+        #[inline]
+        pub fn try_limited_as_array<A: Array>(&self) -> Option<&A> {
+            if self.to_limit_len() >= A::LENGTH {
+                Some(unsafe { &*(self.start.cast().as_ptr()) })
+            } else {
+                None
+            }
+        }
+    }
 
     pub trait Reader {
-        fn push_limit(&mut self, limit: i32) -> result::Result<Option<i32>, stream::Error>;
+        fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>>;
         fn pop_limit(&mut self, old: Option<i32>);
         fn reached_limit(&self) -> bool;
 
@@ -44,15 +171,427 @@ mod internal {
         fn skip_bit64(&mut self) -> Result<()>;
         fn skip_length_delimited(&mut self) -> Result<()>;
 
-        fn into_any<'a>(&'a mut self) -> Any<'a>;
+        fn as_any<'a>(&'a mut self) -> Any<'a>;
         fn from_any<'a>(&'a mut self, any: Any<'a>);
 
         fn reached_end(&self) -> bool;
     }
+
+    /// Represents any input type for a CodedReader. This is slower than a
+    /// generic stream input or slice, but is more flexible and can be used 
+    /// in cases where the input or message type is unknown.
+    pub struct Any<'a> {
+        pub(super) stream: Option<(&'a mut dyn Read, &'a mut [u8])>,
+        /// Values < 0 indicate no limit
+        pub(super) remaining_limit: i32,
+        pub(super) buffer: Buffer,
+
+        pub(super) reached_end: bool
+    }
+
+    impl Any<'_> {
+        /// Drops any borrowed data in the Any leaving only static fields
+        pub(super) fn into_unbound<'a>(self) -> Any<'a> {
+            Any {
+                stream: None,
+                remaining_limit: self.remaining_limit,
+                buffer: self.buffer,
+                reached_end: self.reached_end
+            }
+        }
+        #[inline]
+        fn remaining_limit(&self) -> Option<i32> {
+            if self.remaining_limit < 0 {
+                None
+            } else {
+                let len = self.buffer.to_limit_len() as i32;
+                Some(i32::wrapping_add(self.remaining_limit, len))
+            }
+        }
+        fn read_buffer_partial<'a>(&mut self, slice: &'a mut [u8]) -> Result<&'a mut [u8]> {
+            // check if we reached the end of the buffer
+            // does not check if we've reached end of limit
+            if self.buffer.reached_end() {
+                return Ok(slice);
+            }
+
+            let limit_len = self.buffer.to_limit_len();
+            if self.remaining_limit <= 0 {
+                if limit_len < slice.len() {
+                    unsafe { self.buffer.advance(limit_len); }
+                    return Err(stream::Error.into());
+                }
+
+                unsafe {
+                    self.buffer.copy_nonoverlapping(slice);
+                }
+
+                Ok(&mut [])
+            } else {
+                let (f, s) = slice.split_at_mut(limit_len);
+
+                unsafe {
+                    self.buffer.copy_nonoverlapping(f);
+                }
+
+                Ok(s)
+            }
+        }
+        fn read_direct(stream: &mut dyn Read, buf: &mut [u8], limit: &mut i32) -> Result<()> {
+            if *limit < 0 {
+                stream.read_exact(buf).map_err(Into::into)
+            } else {
+                let remaining_limit = *limit as usize;
+                if remaining_limit == 0 {
+                    Err(stream::Error.into())
+                } else
+                if remaining_limit >= buf.len() {
+                    *limit = i32::wrapping_sub(*limit, buf.len() as i32);
+                    stream.read_exact(buf).map_err(Into::into)
+                } else {
+                    *limit = 0;
+                    stream.read_exact(&mut buf[..remaining_limit])?;
+                    Err(stream::Error.into())
+                }
+            }
+        }
+        /// Attempts to refresh the buffer, returning a bool indicating if the data buffer was filled
+        fn try_refresh(&mut self) -> Result<bool> {
+            let (src, buf) = match &mut self.stream {
+                Some(t) => t,
+                None => return Err(stream::Error.into()),
+            };
+            let amnt = src.read(buf)?;
+
+            self.buffer = Buffer::from_slice(&buf[..amnt]);
+            if self.remaining_limit >= 0 {
+                self.remaining_limit = unsafe { self.buffer.apply_partial_limit(self.remaining_limit) };
+            }
+
+            let refreshed = amnt != 0;
+            self.reached_end = !refreshed;
+            Ok(refreshed)
+        }
+        fn refresh(&mut self) -> Result<()> {
+            self.try_refresh().and_then(|b| if b { Ok(()) } else { Err(stream::Error.into()) })
+        }
+        fn read_byte(&mut self) -> Result<u8> {
+            let mut buf = [0u8; 1];
+            self.read_exact(&mut buf)?;
+            Ok(buf[0])
+        }
+        fn try_read_byte(&mut self) -> Result<Option<u8>> {
+            if self.reached_end {
+                return Ok(None);
+            }
+
+            if self.buffer.to_limit_len() != 0 {
+                unsafe { Ok(Some(self.buffer.next_byte())) }
+            } else {
+                if self.remaining_limit == 0 {
+                    Ok(None)
+                } else {
+                    match self.stream {
+                        Some((ref mut src, [])) => {
+                            let mut buf = [0u8; 1];
+                            let result = src.read(&mut buf)?;
+                            if result != 0 {
+                                if self.remaining_limit > 0 {
+                                    self.remaining_limit -= 1;
+                                }
+                                Ok(Some(buf[0]))
+                            } else {
+                                Ok(None)
+                            }
+                        },
+                        _ => {
+                            self.try_refresh()
+                                .map(|b| b.then(|| unsafe { self.buffer.next_byte() }))
+                                .map_err(Into::into)
+                        }
+                    }
+                }
+            }
+        }
+        fn read_exact(&mut self, slice: &mut [u8]) -> Result<()> {
+            if self.reached_end {
+                return Err(stream::Error.into());
+            }
+
+            let mut remaining_slice = self.read_buffer_partial(slice)?;
+
+            if remaining_slice.len() != 0 {
+                if let Some((ref mut src, ref buf)) = self.stream {
+                    // if the remaining amnt to read is more than or equal to
+                    // the size of the buffer then we read direct from the stream
+                    // and adjust our remaining limit accordingly
+                    if remaining_slice.len() >= buf.len() {
+                        Self::read_direct(*src, remaining_slice, &mut self.remaining_limit)?;
+                    } else {
+                        loop {
+                            self.refresh()?;
+                            remaining_slice = self.read_buffer_partial(slice)?;
+
+                            if remaining_slice.is_empty() {
+                                break;
+                            }
+                        }
+                    }
+
+                    Ok(())
+                } else {
+                    Err(stream::Error.into())
+                }
+            } else {
+                Ok(())
+            }
+        }
+        fn skip(&mut self, amnt: i32) -> Result<()> {
+            let amnt_usize = amnt as usize;
+            if self.reached_end {
+                return Err(stream::Error.into());
+            }
+
+            let limit_buf_len = self.buffer.to_limit_len();
+            if limit_buf_len >= amnt_usize {
+                unsafe { self.buffer.advance(amnt_usize); }
+                Ok(())
+            } else {
+                unsafe { self.buffer.advance(limit_buf_len); }
+                let remaining_amnt = amnt - limit_buf_len as i32;
+                match self.remaining_limit.cmp(&0) {
+                    Ordering::Less => {
+                        match self.stream {
+                            Some((ref mut src, _)) => src.skip(remaining_amnt).map_err(Into::into),
+                            None => Err(stream::Error.into())
+                        }
+                    },
+                    Ordering::Equal => Err(stream::Error.into()),
+                    Ordering::Greater => {
+                        match self.stream {
+                            Some((ref mut src, _)) => {
+                                let remaining_limit = self.remaining_limit;
+                                if remaining_limit > remaining_amnt {
+                                    self.remaining_limit = 0;
+                                    src.skip(remaining_limit).map_err(Into::into)
+                                } else {
+                                    self.remaining_limit = i32::wrapping_sub(self.remaining_limit, remaining_amnt as i32);
+                                    src.skip(remaining_amnt).map_err(Into::into)
+                                }
+                            },
+                            None => unreachable!()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    impl Reader for Any<'_> {
+        fn push_limit(&mut self, limit: i32) -> result::Result<Option<i32>, stream::Error> {
+            let remaining = self.remaining_limit().map(|r| i32::wrapping_sub(r, limit));
+            let failed_len_check = 
+                if let Some(r) = remaining {
+                    // we fail this check if our remaining limit is less than
+                    // the new limit
+                    r < 0
+                } else
+                if self.stream.is_none() {
+                    // we also fail if we're reading directly from a buffer and
+                    // the size of the buffer is less than the limit
+                    match i32::try_from(self.buffer.to_end_len()) {
+                        Ok(r) => r < limit,
+                        Err(_) => false,
+                    }
+                } else { 
+                    false
+                };
+            if failed_len_check {
+                Err(stream::Error)
+            } else {
+                self.remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
+                Ok(remaining)
+            }
+        }
+        fn pop_limit(&mut self, old: Option<i32>) {
+            unsafe {
+                match old {
+                    Some(old) => {
+                        self.remaining_limit = self.buffer.apply_partial_limit(old);
+                    },
+                    None => {
+                        self.buffer.remove_limit();
+                        self.remaining_limit = -1;
+                    }
+                }
+            }
+        }
+        fn reached_limit(&self) -> bool {
+            self.buffer.reached_limit() && self.remaining_limit == 0
+        }
+
+        #[inline]
+        fn read_tag(&mut self) -> Result<Option<u32>> {
+            let b = match self.try_read_byte()? {
+                Some(b) if b < 0x80 => return Ok(Some(b as u32)),
+                Some(b) => b,
+                None => return Ok(None),
+            };
+
+            let mut result = (b & 0x7f) as u32;
+            for i in 1..5 {
+                let b = self.read_byte()?;
+                result |= (b as u32 & 0x7f) << (7 * i);
+                if b < 0x80 {
+                    return Ok(Some(result));
+                }
+            }
+            for _ in 5..10 {
+                let b = self.read_byte()?;
+                if b < 0x80 {
+                    return Ok(Some(result));
+                }
+            }
+            Err(Error::MalformedVarint)
+        }
+        fn read_varint32(&mut self) -> Result<u32> {
+            let mut result = 0;
+            for i in 0..5 {
+                let b = self.read_byte()?;
+                result |= (b as u32 & 0x7f) << (7 * i);
+                if b < 0x80 {
+                    return Ok(result);
+                }
+            }
+            for _ in 5..10 {
+                let b = self.read_byte()?;
+                if b < 0x80 {
+                    return Ok(result);
+                }
+            }
+            Err(Error::MalformedVarint)
+        }
+        fn read_varint64(&mut self) -> Result<u64> {
+            let mut result = 0;
+            for i in 0..10 {
+                let b = self.read_byte()?;
+                result |= (b as u64 & 0x7f) << (7 * i);
+                if b < 0x80 {
+                    return Ok(result);
+                }
+            }
+            Err(Error::MalformedVarint)
+        }
+        fn read_bit32(&mut self) -> Result<u32> {
+            let mut result = [0u8; 4];
+            self.read_exact(&mut result)?;
+            Ok(u32::from_le_bytes(result))
+        }
+        fn read_bit64(&mut self) -> Result<u64> {
+            let mut result = [0u8; 8];
+            self.read_exact(&mut result)?;
+            Ok(u64::from_le_bytes(result))
+        }
+        fn read_length_delimited<B: ByteString>(&mut self) -> Result<B> {
+            let len = 
+                self.read_varint32()
+                    .and_then(|v| Length::new(v as i32).ok_or(Error::NegativeSize))?
+                    .get() as usize;
+            let mut string = B::new(len);
+            if len != 0 {
+                self.read_exact(string.as_mut())?;
+            }
+            Ok(string)
+        }
+
+        fn skip_varint(&mut self) -> Result<()> {
+            for _ in 0..10 {
+                let b = self.read_byte()?;
+                if b < 0x80 {
+                    return Ok(());
+                }
+            }
+            Err(Error::MalformedVarint)
+        }
+        fn skip_bit32(&mut self) -> Result<()> {
+            self.skip(4)
+        }
+        fn skip_bit64(&mut self) -> Result<()> {
+            self.skip(8)
+        }
+        fn skip_length_delimited(&mut self) -> Result<()> {
+            let len = 
+                self.read_varint32()
+                    .and_then(|v| Length::new(v as i32).ok_or(Error::NegativeSize))?
+                    .get();
+            if len != 0 {
+                self.skip(len)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn as_any<'a>(&'a mut self) -> Any<'a> {
+            Any {
+                stream: self.stream.as_mut().map::<(&'a mut dyn Read, &'a mut [u8]), _>(|(s, b)| (*s, *b)),
+                remaining_limit: self.remaining_limit,
+                buffer: self.buffer,
+                reached_end: self.reached_end,
+            }
+        }
+        fn from_any<'a>(&'a mut self, any: Any<'a>) {
+            self.remaining_limit = any.remaining_limit;
+            self.buffer = any.buffer;
+            self.reached_end = self.reached_end;
+        }
+
+        fn reached_end(&self) -> bool {
+            self.reached_end
+        }
+    }
+
+    unsafe impl Send for Any<'_> { }
+    unsafe impl Sync for Any<'_> { }
+
+    #[cfg(test)]
+    mod test {
+        use super::Buffer;
+
+        #[test]
+        fn buffer_from_slice() {
+            let input = [1, 2, 3];
+            let buffer = Buffer::from_slice(&input);
+
+            assert_eq!(buffer.to_limit_len(), 3);
+            assert_eq!(buffer.to_end_len(), 3);
+            assert_eq!(unsafe { buffer.to_limit_as_slice() }, &input);
+        }
+
+        #[test]
+        fn buffer_next_byte() {
+            let input = [1, 2, 3];
+            let mut buffer = Buffer::from_slice(&input);
+
+            let b1 = unsafe { buffer.next_byte() };
+
+            assert_eq!(b1, input[0]);
+            assert_eq!(buffer.to_limit_len(), 2);
+            assert_eq!(buffer.to_end_len(), 2);
+            assert_eq!(unsafe { buffer.to_limit_as_slice() }, &input[1..]);
+            
+            let b2 = unsafe { buffer.peek_byte() };
+
+            assert_eq!(b2, input[1]);
+            assert_eq!(buffer.to_limit_len(), 2);
+            assert_eq!(buffer.to_end_len(), 2);
+            assert_eq!(unsafe { buffer.to_limit_as_slice() }, &input[1..]);
+        }
+    }
 }
 
-use internal::Reader;
-use super::internal::Array;
+use internal::{Reader, Buffer};
+
+pub use internal::Any;
 
 /// The error type for [`CodedReader`](struct.CodedReader.html)
 #[derive(Debug)]
@@ -111,95 +650,64 @@ pub type Result<T> = result::Result<T, Error>;
 /// 
 /// [`CodedReader`]: struct.CodedReader.html
 pub trait Input: internal::Reader { }
+impl<T: internal::Reader> Input for T { }
 
 /// A type used for a [`CodedReader`] reading from a `slice` input.
 /// 
 /// [`CodedReader`]: struct.CodedReader.html
 pub struct Slice<'a> {
     a: PhantomData<&'a [u8]>,
-    start: *const u8,
-    limit: *const u8,
-    end: *const u8,
+    buffer: Buffer
 }
 
 impl<'a> Slice<'a> {
     fn new(value: &'a [u8]) -> Self {
-        let start = value.as_ptr();
-        let end = unsafe { start.add(value.len()) };
         Self {
             a: PhantomData,
-            start,
-            end,
-            limit: end
+            buffer: Buffer::from_slice(value)
         }
-    }
-    fn len_limited(&self) -> usize {
-        usize::wrapping_sub(self.limit as _, self.start as _)
-    }
-    unsafe fn next_byte_unchecked(&self) -> u8 {
-        *self.start
-    }
-    fn try_limited_as_array<A: Array>(&self) -> Option<&'a A> {
-        if self.len_limited() >= A::LENGTH {
-            unsafe { Some(&*(self.start as *const A)) }
-        } else {
-            None
-        }
-    }
-    unsafe fn advance(&mut self, amnt: usize) {
-        let new_pos = self.start.add(amnt);
-
-        debug_assert!(new_pos <= self.limit, "advanced past end of limit: {:p} < {:p}", new_pos, self.limit);
-        debug_assert!(new_pos <= self.end, "advanced past end of buffer: {:p} < {:p}", new_pos, self.end);
-
-        self.start = new_pos;
-    }
-    fn as_limited_slice(&self) -> &'a [u8] {
-        unsafe { slice::from_raw_parts(self.start, self.len_limited()) }
-    }
-    fn read_varint64<A: Array>(&mut self, arr: &A) -> u64 {
-        let mut result = 0u64;
-        for (i, &b) in arr.as_ref().iter().enumerate() {
-            result |= ((b & 0x7F) as u64) << (7 * i);
-        }
-        unsafe { self.advance(A::LENGTH); }
-        result
     }
 }
 
 impl Reader for Slice<'_> {
-    fn push_limit(&mut self, limit: i32) -> result::Result<Option<i32>, stream::Error> {
-        if self.limit == self.end {
-            Ok(None)
-        } else {
-            let len = self.len_limited() as i32;
-            if limit <= len {
-                Ok(Some(i32::wrapping_sub(len, limit)))
-            } else {
-                Err(stream::Error)
+    fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>> {
+        let old = match self.buffer.remaining_limit() {
+            Some(remaining) => {
+                if remaining < limit { // err out if the new limit goes beyond our current limit
+                    return Err(stream::Error);
+                }
+
+                Some(remaining - limit)
+            },
+            None => {
+                if self.buffer.to_end_len() <= limit as usize {
+                    return Err(stream::Error);
+                }
+
+                None
+            },
+        };
+
+        unsafe { self.buffer.apply_limit(limit) };
+        Ok(old)
+    }
+    fn pop_limit(&mut self, old: Option<i32>) {
+        unsafe {
+            match old {
+                Some(old) => self.buffer.apply_limit(old),
+                None => self.buffer.remove_limit(),
             }
         }
     }
-    fn pop_limit(&mut self, old: Option<i32>) {
-        match old {
-            Some(old) => {
-                // if a user forgets a limit, this shouldn't cause undefined behavior as it's still in range,
-                // but it won't do what the user wants
-                self.limit = unsafe { self.start.add(old as usize) };
-                debug_assert!(self.limit <= self.end, "advanced past end of buffer when popping limit");
-            },
-            None => self.limit = self.end,
-        }
-    }
     fn reached_limit(&self) -> bool {
-        self.start >= self.limit
+        self.buffer.reached_limit()
     }
 
     fn read_tag(&mut self) -> Result<Option<u32>> {
         if !self.reached_limit() {
-            let next = unsafe { self.next_byte_unchecked() }; // we haven't reached the end so we're fine
+            let next = unsafe { self.buffer.peek_byte() }; // SAFETY: we haven't reached the end so we're fine
             if next < 0x80 {
-                unsafe { self.advance(1); }
+                unsafe { self.buffer.advance(1); } // SAFETY: same as above
                 Ok(Some(next as u32))
             } else {
                 self.read_varint32().map(Some)
@@ -210,43 +718,45 @@ impl Reader for Slice<'_> {
     }
     fn read_varint32(&mut self) -> Result<u32> {
         let mut result = 0u32;
-        if let Some::<&[u8; 10]>(arr) = self.try_limited_as_array() {
-            for (i, &b) in arr[0..5].iter().enumerate() {
+        if let Some::<&[u8; 10]>(arr) = self.buffer.try_limited_as_array() {
+            let mut iter = arr.as_ref().iter().enumerate();
+            for (i, &b) in iter.by_ref().take(5) {
                 result |= ((b & 0x7f) as u32) << (7 * i);
                 if b < 0x80 {
-                    unsafe { self.advance(i + 1); }
+                    unsafe { self.buffer.advance(i + 1); }
                     return Ok(result);
                 }
             }
-            for (i, &b) in arr[5..10].iter().enumerate() {
+            for (i, &b) in iter {
                 if b < 0x80 {
-                    unsafe { self.advance(i + 1 + 5); } // add 5 for the first bytes we've read
+                    unsafe { self.buffer.advance(i + 1); }
                     return Ok(result);
                 }
             }
             Err(Error::MalformedVarint)
         } else
-        if let Some::<&[u8; 5]>(arr) = self.try_limited_as_array() {
+        if let Some::<&[u8; 5]>(arr) = self.buffer.try_limited_as_array() {
             for (i, &b) in arr.iter().enumerate() {
                 result |= ((b & 0x7f) as u32) << (7 * i);
                 if b < 0x80 {
-                    unsafe { self.advance(i + 1); }
+                    unsafe { self.buffer.advance(i + 1); }
                     return Ok(result);
                 }
             }
-            unsafe { self.advance(5); }
-            for (i, &b) in self.as_limited_slice().iter().enumerate() {
+            unsafe { self.buffer.advance(5) };
+            for (i, &b) in unsafe { self.buffer.to_limit_as_slice() }.iter().enumerate() {
                 if b < 0x80 {
-                    unsafe { self.advance(i + 1); }
+                    unsafe { self.buffer.advance(i + 1); }
                     return Ok(result);
                 }
             }
             Err(stream::Error.into())
         } else {
-            for (i, &b) in self.as_limited_slice().iter().enumerate() {
+            let slice = unsafe { self.buffer.to_limit_as_slice() };
+            for (i, &b) in slice.iter().enumerate() {
                 result |= ((b & 0x7f) as u32) << (7 * i);
                 if b < 0x80 {
-                    unsafe { self.advance(i + 1); }
+                    unsafe { self.buffer.advance(i + 1); }
                     return Ok(result);
                 }
             }
@@ -254,45 +764,43 @@ impl Reader for Slice<'_> {
         }
     }
     fn read_varint64(&mut self) -> Result<u64> {
-        if let Some::<&[u8; 10]>(arr) = self.try_limited_as_array() {
-            match () {
-                _ if arr[0] < 0x80 => Ok(self.read_varint64::<[u8; 1]> (&arr[0..1 ].try_into().unwrap())),
-                _ if arr[1] < 0x80 => Ok(self.read_varint64::<[u8; 2]> (&arr[0..2 ].try_into().unwrap())),
-                _ if arr[2] < 0x80 => Ok(self.read_varint64::<[u8; 3]> (&arr[0..3 ].try_into().unwrap())),
-                _ if arr[3] < 0x80 => Ok(self.read_varint64::<[u8; 4]> (&arr[0..4 ].try_into().unwrap())),
-                _ if arr[4] < 0x80 => Ok(self.read_varint64::<[u8; 5]> (&arr[0..5 ].try_into().unwrap())),
-                _ if arr[5] < 0x80 => Ok(self.read_varint64::<[u8; 6]> (&arr[0..6 ].try_into().unwrap())),
-                _ if arr[6] < 0x80 => Ok(self.read_varint64::<[u8; 7]> (&arr[0..7 ].try_into().unwrap())),
-                _ if arr[7] < 0x80 => Ok(self.read_varint64::<[u8; 8]> (&arr[0..8 ].try_into().unwrap())),
-                _ if arr[8] < 0x80 => Ok(self.read_varint64::<[u8; 9]> (&arr[0..9 ].try_into().unwrap())),
-                _ if arr[9] < 0x80 => Ok(self.read_varint64::<[u8; 10]>(&arr[0..10].try_into().unwrap())),
-                _ => Err(Error::MalformedVarint)
-            }
-        } else {
-            let mut result = 0u64;
-            for (i, &b) in self.as_limited_slice().iter().enumerate() {
+        let mut result = 0u64;
+        let slice = unsafe { self.buffer.to_limit_as_slice() };
+        if slice.len() < 10 {
+            for (i, &b) in slice.iter().enumerate() {
                 result |= ((b & 0x7f) as u64) << (7 * i);
                 if b < 0x80 {
-                    unsafe { self.advance(i); }
+                    unsafe { self.buffer.advance(i + 1); }
                     return Ok(result);
                 }
             }
             Err(stream::Error.into())
+        } else {
+            for (i, &b) in slice.iter().enumerate().take(10) {
+                result |= ((b & 0x7f) as u64) << (7 * i);
+                if b < 0x80 {
+                    unsafe { self.buffer.advance(i + 1); }
+                    return Ok(result);
+                }
+            }
+            Err(Error::MalformedVarint)
         }
     }
     fn read_bit32(&mut self) -> Result<u32> {
-        self.try_limited_as_array()
+        self.buffer.try_limited_as_array()
             .ok_or(stream::Error.into())
-            .map(|&arr| {
-                unsafe { self.advance(4); } // since we already got the array, we know we have at least 4 bytes
+            .map(|&arr| arr)
+            .map(|arr| {
+                unsafe { self.buffer.advance(4); } // since we already got the array, we know we have at least 4 bytes
                 u32::from_le_bytes(arr)
             })
     }
     fn read_bit64(&mut self) -> Result<u64> {
-        self.try_limited_as_array()
+        self.buffer.try_limited_as_array()
             .ok_or(stream::Error.into())
-            .map(|&arr| {
-                unsafe { self.advance(8); } // since we already got the array, we know we have at least 8 bytes
+            .map(|&arr| arr)
+            .map(|arr| {
+                unsafe { self.buffer.advance(8); } // since we already got the array, we know we have at least 8 bytes
                 u64::from_le_bytes(arr)
             })
     }
@@ -301,14 +809,13 @@ impl Reader for Slice<'_> {
         match len {
             len if len < 0 => Err(Error::NegativeSize),
             0 => Ok(ByteString::new(0)),
-            len if len as usize > self.len_limited() => Err(stream::Error.into()),
+            len if len as usize > self.buffer.to_limit_len() => Err(stream::Error.into()),
             len => {
                 let len = len as usize;
                 let mut bytes = B::new(len);
-                let bp = bytes.as_mut().as_mut_ptr();
+                let slice = bytes.as_mut();
                 unsafe { // we've checked that we have enough data to copy in the branch above
-                    self.start.copy_to_nonoverlapping(bp, len);
-                    self.advance(len);
+                    self.buffer.copy_nonoverlapping(slice);
                 }
                 Ok(bytes)
             }
@@ -316,18 +823,18 @@ impl Reader for Slice<'_> {
     }
 
     fn skip_varint(&mut self) -> Result<()> {
-        if let Some::<&[u8; 10]>(arr) = self.try_limited_as_array() {
-            for (i, &b) in arr.iter().enumerate() {
+        if let Some::<&[u8; 10]>(arr) = self.buffer.try_limited_as_array() {
+            for (&b, i) in arr.iter().zip(1..) {
                 if b < 0x80 {
-                    unsafe { self.advance(i); }
+                    unsafe { self.buffer.advance(i); }
                     return Ok(());
                 }
             }
             Err(Error::MalformedVarint)
         } else {
-            for (i, &b) in self.as_limited_slice().iter().enumerate() {
+            for (&b, i) in unsafe { self.buffer.to_limit_as_slice() }.iter().zip(1..) {
                 if b < 0x80 {
-                    unsafe { self.advance(i); }
+                    unsafe { self.buffer.advance(i); }
                     return Ok(());
                 }
             }
@@ -335,16 +842,16 @@ impl Reader for Slice<'_> {
         }
     }
     fn skip_bit32(&mut self) -> Result<()> {
-        if self.len_limited() <= 4 {
-            unsafe { self.advance(4); }
+        if self.buffer.to_limit_len() >= 4 {
+            unsafe { self.buffer.advance(4); }
             Ok(())
         } else {
             Err(stream::Error.into())
         }
     }
     fn skip_bit64(&mut self) -> Result<()> {
-        if self.len_limited() <= 8 {
-            unsafe { self.advance(8); }
+        if self.buffer.to_limit_len() >= 8 {
+            unsafe { self.buffer.advance(8); }
             Ok(())
         } else {
             Err(stream::Error.into())
@@ -356,8 +863,8 @@ impl Reader for Slice<'_> {
             Err(Error::NegativeSize)
         } else {
             let len = len as usize;
-            if self.len_limited() <= len {
-                unsafe { self.advance(len); }
+            if self.buffer.to_limit_len() >= len {
+                unsafe { self.buffer.advance(len); }
                 Ok(())
             } else {
                 Err(stream::Error.into())
@@ -365,30 +872,22 @@ impl Reader for Slice<'_> {
         }
     }
 
-    fn into_any<'a>(&'a mut self) -> Any<'a> {
+    fn as_any<'a>(&'a mut self) -> Any<'a> {
         Any {
-            stream_data: None,
+            stream: None,
             remaining_limit: 0,
-
-            start: self.start,
-            limit: self.limit,
-            end: self.end,
-
+            buffer: self.buffer,
             reached_end: self.reached_end()
         }
     }
     fn from_any<'a>(&'a mut self, any: Any<'a>) {
-        self.start = any.start;
-        self.limit = any.limit;
-        // we don't need to move back end since it'll never change
+        self.buffer = any.buffer;
     }
 
     fn reached_end(&self) -> bool {
-        self.start > self.end
+        self.buffer.reached_end()
     }
 }
-
-impl Input for Slice<'_> { }
 
 unsafe impl Send for Slice<'_> { }
 unsafe impl Sync for Slice<'_> { }
@@ -399,9 +898,7 @@ unsafe impl Sync for Slice<'_> { }
 pub struct Stream<T> {
     input: T,
     buf: Box<[u8]>,
-    start: *const u8,
-    limit: *const u8,
-    end: *const u8,
+    buffer: Buffer,
     remaining_limit: i32,
     reached_end: bool
 }
@@ -409,59 +906,105 @@ pub struct Stream<T> {
 impl<T: Read> Stream<T> {
     fn new(input: T, cap: usize) -> Self {
         let buf = alloc::vec![0; cap].into_boxed_slice();
-        let ptr = buf.as_ptr();
+        let buffer = Buffer::from_slice(&buf[0..0]);
 
         Stream {
             input,
             buf,
-            start: ptr,
-            limit: ptr,
-            end: ptr,
+            buffer,
             remaining_limit: -1,
             reached_end: false
         }
     }
-    fn buf_len(&self) -> usize {
-        usize::wrapping_sub(self.start as _, self.limit as _)
+    fn into_inner(self) -> T {
+        self.input
     }
-    fn buf(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.start, self.buf_len()) }
+    fn remaining_limit(&self) -> Option<i32> {
+        self.buffer.remaining_limit().map(|i| i + self.remaining_limit)
     }
-    fn refresh(&mut self) -> Result<usize> {
-        unimplemented!()
+    fn try_refresh(&mut self) -> Result<bool> {
+        let amnt = self.input.read(&mut self.buf)?;
+
+        self.buffer = Buffer::from_slice(&self.buf[..amnt]);
+        if self.remaining_limit >= 0 {
+            self.remaining_limit = unsafe { self.buffer.apply_partial_limit(self.remaining_limit) };
+        }
+
+        let refreshed = amnt != 0;
+        self.reached_end = !refreshed;
+        Ok(refreshed)
     }
-    fn try_as_array<A: Array>(&self) -> Option<&A> {
-        if self.buf_len() >= A::LENGTH {
-            unsafe { Some(&*self.start.cast()) }
+    fn refresh(&mut self) -> Result<()> {
+        self.try_refresh().and_then(|b| b.then_some(()).ok_or(stream::Error.into()))
+    }
+    fn read_buffer_partial<'a>(&mut self, slice: &'a mut [u8]) -> Result<&'a mut [u8]> {
+        // check if we reached the end of the buffer
+        // does not check if we've reached end of limit
+        if self.buffer.reached_end() {
+            return Ok(slice);
+        }
+
+        let limit_len = self.buffer.to_limit_len();
+        if self.remaining_limit == 0 {
+            if limit_len < slice.len() {
+                unsafe { self.buffer.advance(limit_len); }
+                return Err(stream::Error.into());
+            }
+
+            unsafe {
+                self.buffer.copy_nonoverlapping(slice);
+            }
+
+            Ok(&mut [])
         } else {
-            None
+            let (f, s) = slice.split_at_mut(cmp::min(limit_len, slice.len()));
+
+            if f.len() != 0 {
+                unsafe {
+                    self.buffer.copy_nonoverlapping(f);
+                }
+            }
+
+            Ok(s)
         }
     }
-    fn reached_limit(&self) -> bool {
-        self.start > self.limit && self.remaining_limit == 0
-    }
-    fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {
-        if !self.reached_limit() && self.buf_len() == 0 && buf.len() > self.buf.len() {
-            while buf.len() > 0 {
-                let amnt = self.input.read(buf)?;
-                buf = &mut buf[..amnt];
-            }
+    fn read_direct(&mut self, buf: &mut [u8]) -> Result<()> {
+        if self.remaining_limit < 0 {
+            self.input.read_exact(buf).map_err(Into::into)
         } else {
-            while buf.len() > 0 {
-                let current_buf = self.buf();
-                if buf.len() <= current_buf.len() {
-                    buf[..current_buf.len()].copy_from_slice(current_buf);
-                    unsafe { self.advance(buf.len()); }
-                    break;
-                } else {
-                    let (buffered, read) = buf.split_at_mut(self.buf_len());
-                    buffered.copy_from_slice(current_buf);
-                    unsafe { self.advance(buffered.len()); }
-                    buf = read;
+            let remaining_limit = self.remaining_limit as usize;
+            if remaining_limit == 0 {
+                Err(stream::Error.into())
+            } else
+            if remaining_limit >= buf.len() {
+                self.remaining_limit = i32::wrapping_sub(self.remaining_limit, buf.len() as i32);
+                self.input.read_exact(buf).map_err(Into::into)
+            } else {
+                self.remaining_limit = 0;
+                self.input.read_exact(&mut buf[..remaining_limit])?;
+                Err(stream::Error.into())
+            }
+        }
+    }
+    fn read_exact(&mut self, slice: &mut [u8]) -> Result<()> {
+        if self.reached_end {
+            return Err(stream::Error.into());
+        }
 
-                    if self.refresh()? == 0 {
-                        self.reached_end = true;
-                        return Err(stream::Error.into());
+        let mut remaining_slice = self.read_buffer_partial(slice)?;
+        if remaining_slice.len() != 0 {
+            // if the remaining amnt to read is more than or equal to
+            // the size of the buffer then we read direct from the stream
+            // and adjust our remaining limit accordingly
+            if remaining_slice.len() >= self.buf.len() {
+                self.read_direct(remaining_slice)?;
+            } else {
+                loop {
+                    self.refresh()?;
+                    remaining_slice = self.read_buffer_partial(slice)?;
+
+                    if remaining_slice.is_empty() {
+                        break;
                     }
                 }
             }
@@ -469,108 +1012,162 @@ impl<T: Read> Stream<T> {
 
         Ok(())
     }
-    fn skip(&mut self, amnt: usize) -> Result<()> {
-        if self.buf.len() > 512 {
-            if self.buf_len() >= amnt {
-                unsafe { self.advance(amnt); }
-                return Ok(());
-            } else {
-                while amnt > 0 {
-
-                }
-            }
-        } else {
-            let mut tmp = [0; 512];
-
+    fn skip(&mut self, amnt: i32) -> Result<()> {
+        let amnt_usize = amnt as usize;
+        if self.reached_end {
+            return Err(stream::Error.into());
         }
 
-        Ok(())
+        let limit_buf_len = self.buffer.to_limit_len();
+        if limit_buf_len >= amnt_usize {
+            unsafe { self.buffer.advance(amnt_usize); }
+            Ok(())
+        } else {
+            unsafe { self.buffer.advance(limit_buf_len); }
+            let remaining_amnt = amnt - limit_buf_len as i32;
+            match self.remaining_limit.cmp(&0) {
+                Ordering::Less => {
+                    self.input.skip(remaining_amnt).map_err(Into::into)
+                },
+                Ordering::Equal => Err(stream::Error.into()),
+                Ordering::Greater => {
+                    let remaining_limit = self.remaining_limit;
+                    if remaining_limit > remaining_amnt {
+                        self.remaining_limit = 0;
+                        self.input.skip(remaining_limit).map_err(Into::into)
+                    } else {
+                        self.remaining_limit = i32::wrapping_sub(self.remaining_limit, remaining_amnt as i32);
+                        self.input.skip(remaining_amnt).map_err(Into::into)
+                    }
+                }
+            }
+        }
     }
-    unsafe fn advance(&mut self, amnt: usize) {
-        self.start = self.start.add(amnt);
-    }
+    /// Attempts to refresh the buffer and return the next byte.
+    /// If no buffer exists this tries to read the next byte.
+    /// 
+    /// This assumes that the limit hasn't been reached yet and
+    /// is being used in conjunction with try_peek_byte which checks this and advance(1).
     fn try_read_byte(&mut self) -> Result<Option<u8>> {
-        unimplemented!()
+        if self.reached_end {
+            return Ok(None);
+        }
+
+        if self.buffer.to_limit_len() != 0 {
+            unsafe { Ok(Some(self.buffer.next_byte())) }
+        } else {
+            if self.remaining_limit == 0 {
+                Ok(None)
+            } else {
+                if self.buf.len() != 0 {
+                    self.try_refresh()
+                        .map(|b| b.then(|| unsafe { self.buffer.next_byte() }))
+                        .map_err(Into::into)
+                } else {
+                    let mut buf = [0u8; 1];
+                    let result = self.input.read(&mut buf)?;
+                    if result != 0 {
+                        if self.remaining_limit > 0 {
+                            self.remaining_limit -= 1;
+                        }
+                        Ok(Some(buf[0]))
+                    } else {
+                        Ok(None)
+                    }
+                }
+            }
+        }
     }
     fn read_byte(&mut self) -> Result<u8> {
-        unimplemented!()
-    }
-    fn reached_end_of_buffer(&self) -> bool {
-        self.start > self.end
-    }
-    fn read_tag_fallback(&mut self, b: u8) -> Result<u32> {
-        unimplemented!()
-    }
-    fn read_varint32_slow(&mut self) -> Result<u32> {
-        unimplemented!()
-    }
-    fn read_varint64_slow(&mut self) -> Result<u64> {
-        unimplemented!()
+        let mut buf = [0u8; 1];
+        self.read_exact(&mut buf)?;
+        Ok(buf[0])
     }
 }
 
 impl<T: Read> Reader for Stream<T> {
-    fn push_limit(&mut self, limit: i32) -> result::Result<Option<i32>, stream::Error> {
-        let limit_len_in_buf = cmp::min(self.buf_len(), limit as usize);
-        let remaining_limit = limit - (limit_len_in_buf as i32);
-        let old_remaining_limit = self.remaining_limit;
+    fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>> {
+        let old = match self.remaining_limit() {
+            Some(remaining) => {
+                // if we have some existing limit, check ahead of time to
+                // make sure we don't extend behind the existing limit
+                if remaining < limit {
+                    return Err(stream::Error)
+                }
 
-        self.limit = unsafe { self.start.add(limit_len_in_buf) };
-        self.remaining_limit = remaining_limit;
-
-        if old_remaining_limit < 0 {
-            Ok(None)
-        } else {
-            Ok(Some(old_remaining_limit))
-        }
+                Some(remaining - limit)
+            },
+            None => None
+        };
+        self.remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
+        Ok(old)
     }
     fn pop_limit(&mut self, old: Option<i32>) {
         match old {
             Some(old) => {
-                unimplemented!()
+                self.remaining_limit = unsafe { self.buffer.apply_partial_limit(old) };
             },
-            None => self.remaining_limit = -1,
+            None => {
+                unsafe { self.buffer.remove_limit(); }
+                self.remaining_limit = -1;
+            },
         }
     }
     fn reached_limit(&self) -> bool {
-        self.reached_limit()
+        self.buffer.reached_limit() && self.remaining_limit == 0
     }
 
+    #[inline]
     fn read_tag(&mut self) -> Result<Option<u32>> {
-        match self.try_read_byte()? {
-            Some(b) => {
-                if b < 0x80 {
-                    Ok(Some(b as u32))
-                } else {
-                    self.read_tag_fallback(b).map(Some)
-                }
-            },
-            None => Ok(None)
+        let b = match self.try_read_byte()? {
+            Some(b) if b < 0x80 => return Ok(Some(b as u32)),
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let mut result = (b & 0x7f) as u32;
+        for i in 1..5 {
+            let b = self.read_byte()?;
+            result |= (b as u32 & 0x7f) << (7 * i);
+            if b < 0x80 {
+                return Ok(Some(result));
+            }
         }
+        for _ in 5..10 {
+            let b = self.read_byte()?;
+            if b < 0x80 {
+                return Ok(Some(result));
+            }
+        }
+        Err(Error::MalformedVarint)
     }
     fn read_varint32(&mut self) -> Result<u32> {
-        if let Some::<&[u8; 10]>(buf) = self.try_as_array() {
-            let mut result = 0;
-            for (i, &b) in buf[0..5].iter().enumerate() {
-
+        let mut result = 0;
+        for i in 0..5 {
+            let b = self.read_byte()?;
+            result |= (b as u32 & 0x7f) << (7 * i);
+            if b < 0x80 {
+                return Ok(result);
             }
-            for (i, &b) in buf[5..10].iter().enumerate() {
-                if b < 0x80 {
-                    unsafe { self.advance(i); }
-                    return Ok(result);
-                }
-            }
-            Err(Error::MalformedVarint)
-        } else {
-            self.read_varint32_slow()
         }
+        for _ in 5..10 {
+            let b = self.read_byte()?;
+            if b < 0x80 {
+                return Ok(result);
+            }
+        }
+        Err(Error::MalformedVarint)
     }
     fn read_varint64(&mut self) -> Result<u64> {
-        if let Some::<&[u8; 10]>(buf) = self.try_as_array() {
-            unimplemented!()
-        } else {
-            self.read_varint64_slow()
+        let mut result = 0;
+        for i in 0..10 {
+            let b = self.read_byte()?;
+            result |= (b as u64 & 0x7f) << (7 * i);
+            if b < 0x80 {
+                return Ok(result);
+            }
         }
+        Err(Error::MalformedVarint)
     }
     fn read_bit32(&mut self) -> Result<u32> {
         let mut value = [0u8; 4];
@@ -596,22 +1193,12 @@ impl<T: Read> Reader for Stream<T> {
     }
 
     fn skip_varint(&mut self) -> Result<()> {
-        if let Some::<&[u8; 10]>(buf) = self.try_as_array() {
-            for (i, &b) in buf.iter().enumerate() {
-                if b < 0x80 {
-                    unsafe { self.advance(i); }
-                    return Ok(());
-                }
-            }
-        } else {
-            for i in 0..10 {
-                let b = self.read_byte()?;
-                if b < 0x80 {
-                    return Ok(());
-                }
+        for _ in 0..10 {
+            let b = self.read_byte()?;
+            if b < 0x80 {
+                return Ok(());
             }
         }
-
         Err(Error::MalformedVarint)
     }
     fn skip_bit32(&mut self) -> Result<()> {
@@ -622,30 +1209,24 @@ impl<T: Read> Reader for Stream<T> {
     }
     fn skip_length_delimited(&mut self) -> Result<()> {
         let len = self.read_varint32()? as i32;
-        if len < 0 {
-            Err(Error::NegativeSize)
-        } else {
-            self.skip(len as usize)
+        match len.cmp(&0) {
+            Ordering::Less => Err(Error::NegativeSize),
+            Ordering::Equal => Ok(()),
+            Ordering::Greater => self.skip(len)
         }
     }
 
-    fn into_any<'a>(&'a mut self) -> Any<'a> {
+    fn as_any<'a>(&'a mut self) -> Any<'a> {
         Any {
-            stream_data: Some((&mut self.input, &mut self.buf)),
+            stream: Some((&mut self.input, &mut self.buf)),
             remaining_limit: self.remaining_limit,
-
-            start: self.start,
-            limit: self.limit,
-            end: self.end,
-
+            buffer: self.buffer,
             reached_end: self.reached_end
         }
     }
     fn from_any<'a>(&'a mut self, any: Any<'a>) {
         self.remaining_limit = any.remaining_limit;
-        self.start = any.start;
-        self.limit = any.limit;
-        self.end = any.end;
+        self.buffer = any.buffer;
         self.reached_end = any.reached_end;
     }
 
@@ -653,8 +1234,6 @@ impl<T: Read> Reader for Stream<T> {
         self.reached_end
     }
 }
-
-impl<T: Read> Input for Stream<T> { }
 
 unsafe impl<T: Send> Send for Stream<T> { }
 unsafe impl<T: Sync> Sync for Stream<T> { }
@@ -689,8 +1268,15 @@ pub enum UnknownFieldHandling {
     Skip,
 }
 
+impl Default for UnknownFieldHandling {
+    fn default() -> Self {
+        UnknownFieldHandling::Store
+    }
+}
+
 impl UnknownFieldHandling {
     /// Returns whether the handling is set to skip unknown fields
+    #[inline]
     pub fn skip(self) -> bool {
         self == UnknownFieldHandling::Skip
     }
@@ -742,201 +1328,6 @@ impl Builder {
     }
 }
 
-/// Represents any input type for a CodedReader. This is slower than a
-/// generic stream input or slice, but is more flexible and can be used 
-/// in cases where the input or message type is unknown.
-pub struct Any<'a> {
-    stream_data: Option<(&'a mut dyn Read, &'a mut [u8])>,
-    /// Values < 0 indicate no limit
-    remaining_limit: i32,
-
-    start: *const u8,
-    /// With no limit, this is equal to end
-    limit: *const u8,
-    end: *const u8,
-
-    reached_end: bool
-}
-
-impl Any<'_> {
-    fn reached_limit(&self) -> bool {
-        self.start > self.limit && self.remaining_limit >= 0
-    }
-    #[inline]
-    fn next_byte(&self) -> Option<u8> {
-        if !self.reached_limit() {
-            unsafe { Some(*self.start) }
-        } else {
-            None
-        }
-    }
-    #[inline]
-    fn try_read_byte(&mut self) -> Option<u8> {
-        if !self.reached_limit() {
-            let result = unsafe { Some(*self.start) };
-            unsafe { self.advance(1); }
-            result
-        } else {
-            None
-        }
-    }
-    #[inline]
-    fn read_byte(&mut self) -> Result<u8> {
-        if !self.reached_limit() {
-            let result = unsafe { Ok(*self.start) };
-            unsafe { self.advance(1); }
-            result
-        } else {
-            unimplemented!()
-        }
-    }
-    fn is_stream(&self) -> bool {
-        self.stream_data.is_some()
-    }
-    fn len(&self) -> usize {
-        usize::wrapping_sub(self.limit as _, self.start as _)
-    }
-    fn refresh(&mut self) -> Result<Option<NonZeroUsize>> {
-        match &mut self.stream_data {
-            Some((input, buf)) => {
-                let new_buf_len = input.read(buf)?;
-
-                self.start = buf.as_ptr();
-                self.end = unsafe { self.start.add(new_buf_len) };
-                if self.remaining_limit < 0 {
-                    self.limit = self.end;
-                } else {
-                    let mut remaining_limit = self.remaining_limit as usize;
-                    if remaining_limit < new_buf_len {
-                        self.remaining_limit = 0;
-                        self.limit = unsafe { self.end.sub(remaining_limit) };
-                    } else {
-                        remaining_limit -= new_buf_len;
-                        self.remaining_limit = remaining_limit as i32;
-                        self.limit = self.end;
-                    }
-                }
-
-                Ok(NonZeroUsize::new(new_buf_len))
-            },
-            _ => Ok(None)
-        }
-    }
-
-    unsafe fn advance(&mut self, amnt: usize) {
-        let new_pos = self.start.add(amnt);
-
-        debug_assert!(new_pos < self.limit, "advanced past end of limit");
-        debug_assert!(new_pos < self.end, "advanced past end of buffer");
-
-        self.start = new_pos;
-    }
-
-    fn skip(&mut self, mut amnt: usize) -> Result<()> {
-        loop {
-            let buf_len = self.len();
-            if amnt <= buf_len {
-                unsafe { self.advance(amnt); }
-                return Ok(());
-            } else {
-                if let None = self.refresh()? {
-                    return Err(stream::Error.into());
-                } else {
-                    amnt -= buf_len;
-                }
-            }
-        }
-    }
-}
-
-impl Input for Any<'_> { }
-impl Reader for Any<'_> {
-    fn push_limit(&mut self, limit: i32) -> result::Result<Option<i32>, stream::Error> {
-        unimplemented!()
-    }
-    fn pop_limit(&mut self, old: Option<i32>) {
-        unimplemented!()
-    }
-    fn reached_limit(&self) -> bool {
-        unimplemented!()
-    }
-
-    #[inline]
-    fn read_tag(&mut self) -> Result<Option<u32>> {
-        if self.reached_limit() {
-            Ok(None)
-        } else
-        if self.reached_end() {
-            match self.refresh()? {
-                None => Ok(None),
-                _ => self.read_varint32().map(Some)
-            }
-        } else {
-            self.read_varint32().map(Some)
-        }
-    }
-    fn read_varint32(&mut self) -> Result<u32> {
-        unimplemented!()
-    }
-    fn read_varint64(&mut self) -> Result<u64> {
-        unimplemented!()
-    }
-    fn read_bit32(&mut self) -> Result<u32> {
-        unimplemented!()
-    }
-    fn read_bit64(&mut self) -> Result<u64> {
-        unimplemented!()
-    }
-    fn read_length_delimited<B: ByteString>(&mut self) -> Result<B> {
-        unimplemented!()
-    }
-
-    fn skip_varint(&mut self) -> Result<()> {
-        unimplemented!()
-    }
-    fn skip_bit32(&mut self) -> Result<()> {
-        self.skip(4)
-    }
-    fn skip_bit64(&mut self) -> Result<()> {
-        self.skip(8)
-    }
-    fn skip_length_delimited(&mut self) -> Result<()> {
-        let len = self.read_varint32()? as i32;
-        if len < 0 {
-            Err(Error::NegativeSize)
-        } else {
-            self.skip(len as usize)
-        }
-    }
-
-    fn into_any<'a>(&'a mut self) -> Any<'a> {
-        Any {
-            stream_data: self.stream_data.as_mut().map::<(&'a mut dyn Read, &'a mut [u8]), _>(|(s, b)| (s, b)),
-            remaining_limit: self.remaining_limit,
-
-            start: self.start,
-            limit: self.limit,
-            end: self.end,
-
-            reached_end: self.reached_end
-        }
-    }
-    fn from_any<'a>(&'a mut self, any: Any<'a>) {
-        self.remaining_limit = any.remaining_limit;
-        self.start = any.start;
-        self.limit = any.limit;
-        self.end = any.end;
-        self.reached_end = any.reached_end;
-    }
-
-    fn reached_end(&self) -> bool {
-        unimplemented!()
-    }
-}
-
-unsafe impl Send for Any<'_> { }
-unsafe impl Sync for Any<'_> { }
-
 /// Provides a bridge for a generic [`CodedReader`] to be converted
 /// to a [`CodedReader`]`<`[`Any`]`>` and vice versa.
 /// 
@@ -955,7 +1346,7 @@ impl<'a, T: Input> AnyConverter<'a, T> {
         let src_ptr = unsafe { NonNull::new_unchecked(src) }; // don't use from since the borrow moves into the from call
         let brdg = 
             CodedReader {
-                inner: src.inner.into_any(),
+                inner: src.inner.as_any(),
                 last_tag: src.last_tag,
                 options: src.options.clone()
             };
@@ -986,7 +1377,7 @@ impl<'a, T: Input> Drop for AnyConverter<'a, T> {
             let src: &'a mut CodedReader<T> = &mut *self.src.as_ptr();
 
             src.last_tag = self.brdg.last_tag;
-            src.inner.from_any(ManuallyDrop::take(&mut self.brdg).inner);
+            src.inner.from_any(ManuallyDrop::take(&mut self.brdg).inner.into_unbound());
         }
     }
 }
@@ -1053,7 +1444,7 @@ impl<'a, T: Input + 'a> Drop for Limit<'a, T> {
     }
 }
 
-/// A coded input reader that reads from a specified input.
+/// A protobuf coded input reader that reads from a specified input.
 pub struct CodedReader<T: Input> {
     inner: T,
     last_tag: Option<Tag>,
@@ -1077,6 +1468,12 @@ impl<T: Read> CodedReader<Stream<T>> {
     pub fn with_capacity(capacity: usize, inner: T) -> Self {
         Builder::new().with_capacity(capacity, inner)
     }
+
+    /// Returns the underlying stream value. This will discard any data that
+    /// exists in the buffer.
+    pub fn into_inner(self) -> T {
+        self.inner.into_inner()
+    }
 }
 
 impl<'a> CodedReader<Slice<'a>> {
@@ -1089,6 +1486,11 @@ impl<'a> CodedReader<Slice<'a>> {
     /// [`Read`]: streams/trait.Read.html
     pub fn with_slice(inner: &'a [u8]) -> Self {
         Builder::new().with_slice(inner)
+    }
+
+    /// Consumes the reader, returning the remaining slice
+    pub fn into_inner(self) -> &'a [u8] {
+        unsafe { self.inner.buffer.to_end_as_slice() }
     }
 }
 
@@ -1150,11 +1552,11 @@ impl<T: Input> CodedReader<T> {
     pub fn read_varint64(&mut self) -> Result<u64> {
         self.inner.read_varint64()
     }
-    /// Reads a 4-byte little endian value
+    /// Reads a 4-byte little endian value.
     pub fn read_bit32(&mut self) -> Result<u32> {
         self.inner.read_bit32()
     }
-    /// Reads a 8-byte little endian value
+    /// Reads a 8-byte little endian value.
     pub fn read_bit64(&mut self) -> Result<u64> {
         self.inner.read_bit64()
     }
@@ -1221,123 +1623,255 @@ impl<T: Input> CodedReader<T> {
 
 #[cfg(test)]
 mod test {
-    use crate::io::{stream, read::{Reader, Any, Error}};
+    use alloc::borrow::BorrowMut;
+    use crate::io::read::{Any, Input, CodedReader};
 
-    trait Checked {
-        /// Asserts whether the input type is in a valid state
-        fn assert_is_valid(&self);
-    }
+    pub trait ReaderInput<'a> {
+        type Reader: Input + 'a;
 
-    trait ReaderInput<'a> {
-        type Reader: Reader + Checked + 'a;
+        fn new(b: &'a [u8]) -> CodedReader<Self::Reader>;
 
-        fn new(b: &'a [u8]) -> Self::Reader;
-    }
-
-    trait Case {
-        fn input() -> &'static [u8];
-        fn run<R: Reader>(r: &mut R);
-
-        fn run_with<R: ReaderInput<'static>>() {
-            let mut r = R::new(Self::input());
-            Self::run(&mut r);
-            r.assert_is_valid();
+        fn run<F: FnOnce(&mut CodedReader<Self::Reader>)>(b: &'a [u8], f: F) {
+            let mut reader = Self::new(b);
+            f(&mut reader)
         }
-        fn run_with_any<R: ReaderInput<'static>>() {
-            let mut r = R::new(Self::input());
-            let mut any = r.into_any();
-            Self::run(&mut any);
+        fn run_any<F: FnOnce(&mut CodedReader<Any>)>(b: &'a [u8], f: F) {
+            let mut reader = Self::new(b);
+            let mut convert = reader.as_any();
+            f(&mut convert)
         }
     }
+
+    trait RunHelper<T: Input> {
+        fn then<A: a::Action<T>>(self, a: A) -> Self;
+    }
+
+    impl<T: BorrowMut<CodedReader<U>>, U: Input> RunHelper<U> for T {
+        fn then<A: a::Action<U>>(mut self, a: A) -> Self {
+            a.run(self.borrow_mut());
+            self
+        }
+    }
+
+    mod actions {
+        use core::fmt::Debug;
+        use core::marker::PhantomData;
+        use crate::io::{Tag, stream, read::{self, Input, CodedReader, Error}};
+
+        pub trait Action<T: Input> {
+            fn run(self, reader: &mut CodedReader<T>);
+        }
+
+        impl<T: Input, F: FnOnce(&mut CodedReader<T>)> Action<T> for F {
+            fn run(self, reader: &mut CodedReader<T>) {
+                self(reader)
+            }
+        }
+
+        pub mod read_tag {
+            use core::convert::TryFrom;
+            use crate::io::{Tag, read::{Input, CodedReader}};
+            use super::Action;
+
+            pub struct ReadTag(Option<Tag>);
+
+            impl<T: Input> Action<T> for ReadTag {
+                fn run(self, reader: &mut CodedReader<T>) {
+                    let r = reader.read_tag();
+    
+                    assert!(matches!(r, Ok(v) if v == self.0), "expected `{:?}`, got `{:?}`", self.0, r);
+                    assert_eq!(self.0, reader.last_tag());
+                }
+            }
+
+            pub fn none() -> ReadTag {
+                ReadTag(None)
+            }
+            pub fn value(v: u32) -> ReadTag {
+                ReadTag(Some(Tag::try_from(v).unwrap()))
+            }
+        }
+
+        pub struct Pipe<T: Input, R: ReadAction<T>, A: AssertAction<R::Output>> {
+            t: PhantomData<fn(T)>,
+            r: R,
+            a: A
+        }
+        impl<T: Input, R: ReadAction<T>, A: AssertAction<R::Output>> Action<T> for Pipe<T, R, A> {
+            fn run(self, r: &mut CodedReader<T>) {
+                self.a.assert(self.r.read(r))
+            }
+        }
+
+        pub trait ReadAction<T: Input> {
+            type Output;
+
+            fn read(self, reader: &mut CodedReader<T>) -> Self::Output;
+
+            fn with<A: AssertAction<Self::Output>>(self, a: A) -> Pipe<T, Self, A> where Self: Sized {
+                Pipe { t: PhantomData, r: self, a }
+            }
+        }
+        impl<T: Input, O, F: FnOnce(&mut CodedReader<T>) -> O> ReadAction<T> for F {
+            type Output = O;
+
+            fn read(self, reader: &mut CodedReader<T>) -> Self::Output {
+                self(reader)
+            }
+        }
+
+        pub fn try_read_tag<T: Input>(r: &mut CodedReader<T>) -> read::Result<Option<Tag>> { r.read_tag() }
+        pub fn read_varint32<T: Input>(r: &mut CodedReader<T>) -> read::Result<u32> { r.read_varint32() }
+        pub fn read_varint64<T: Input>(r: &mut CodedReader<T>) -> read::Result<u64> { r.read_varint64() }
+        pub fn read_bit32<T: Input>(r: &mut CodedReader<T>) -> read::Result<u32> { r.read_bit32() }
+        pub fn read_bit64<T: Input>(r: &mut CodedReader<T>) -> read::Result<u64> { r.read_bit64() }
+
+        /// An assertion action that asserts some thing about a provided value
+        pub trait AssertAction<V>: Sized {
+            fn assert(self, value: V);
+        }
+
+        impl<V, F: FnOnce(V)> AssertAction<V> for F {
+            fn assert(self, value: V) {
+                self(value)
+            }
+        }
+
+        pub fn value<V: PartialEq + Debug, E: Debug>(value: V) -> impl FnOnce(Result<V, E>) {
+            move |v| assert!(matches!(&v, Ok(v) if v == &value), "expected `{:?}`, got `{:?}`", value, v)
+        }
+        pub fn stream_error<T: Debug>(r: Result<T, Error>) {
+            assert!(matches!(r, Err(Error::StreamError(stream::Error))), "expected `{:?}`, got `{:?}`", Err::<T, _>(Error::StreamError(stream::Error)), r)
+        }
+        pub fn malformed_varint<T: Debug>(r: Result<T, Error>) {
+            assert!(matches!(r, Err(Error::MalformedVarint)), "expected `{:?}`, got `{:?}`", Err::<T, _>(Error::MalformedVarint), r)
+        }
+    }
+
+    use actions as a;
+
+    use a::ReadAction;
 
     macro_rules! test {
-        ($($ti:ident = $x:expr => |$f:ident| $t:block),+) => {
+        ($(($ti:ident | $tia:ident) = $x:expr => |$f:ident| $t:block),+) => {
             $(
-                pub struct $ti;
+                pub fn $ti<T: ReaderInput<'static>>() {
+                    static INPUT: &'static [u8] = &$x;
 
-                impl $ti {
-                    const INPUT: &'static [u8] = &$x;
+                    T::run(INPUT, |$f| $t);
                 }
 
-                impl Case for $ti {
-                    fn input() -> &'static [u8] { Self::INPUT }
-                    fn run<R: Reader>($f: &mut R) {
-                        $t
-                    }
+                pub fn $tia<T: ReaderInput<'static>>() {
+                    static INPUT: &'static [u8] = &$x;
+
+                    T::run_any(INPUT, |$f| $t);
                 }
             )+
         };
     }
 
     test! {
-        ReadNoTagFromEmpty = [] => |r| {
-            let result = r.read_tag();
-
-            assert!(matches!(result, Ok(None)));
+        (read_no_tag_from_empty | read_no_tag_from_empty_any) = [] => |r| {
+            r.then(a::read_tag::none());
         },
-        ReadTag = [8] => |r| {
-            let result = r.read_tag();
-            
-            assert!(matches!(result, Ok(Some(8))));
-
-            let result = r.read_tag();
-
-            assert!(matches!(result, Ok(None)));
+        (read_tag | read_tag_any) = [8] => |r| {
+            r.then(a::read_tag::value(8))
+             .then(a::read_tag::none());
         },
-        Read2ByteTag = [128, 1] => |r| {
-            let result = r.read_tag();
-    
-            assert!(matches!(result, Ok(Some(0x80))));
-    
-            let result = r.read_tag();
-    
-            assert!(matches!(result, Ok(None)));
+        (read_2byte_tag | read_2byte_tag_any) = [128, 1] => |r| {
+            r.then(a::read_tag::value(0x80))
+             .then(a::read_tag::none());
         },
-        Read5ByteTag = [128, 128, 128, 128, 1] => |r| {
-            let result = r.read_tag();
-    
-            assert!(matches!(result, Ok(Some(0x10000000))));
-    
-            let result = r.read_tag();
-    
-            assert!(matches!(result, Ok(None)));
+        (read_5byte_tag | read_5byte_tag_any) = [128, 128, 128, 128, 1] => |r| {
+            r.then(a::read_tag::value(0x10000000))
+             .then(a::read_tag::none());
         },
-        Read10ByteTag = [128, 128, 128, 128, 129, 128, 128, 128, 128, 0] => |r| {
-            let result = r.read_tag();
-    
-            assert!(matches!(result, Ok(Some(0x10000000))));
-    
-            let result = r.read_tag();
-    
-            assert!(matches!(result, Ok(None)));
+        (read_10byte_tag | read_10byte_tag_any) = [128, 128, 128, 128, 129, 128, 128, 128, 128, 0] => |r| {
+            r.then(a::read_tag::value(0x10000000))
+             .then(a::read_tag::none());
         },
-        ReadTruncatedTag = [128] => |r| {
-            let result = r.read_tag();
-    
-            assert!(matches!(result, Err(Error::StreamError(stream::Error))));
+        (read_truncated_tag | read_truncated_tag_any) = [128] => |r| {
+            r.then(a::try_read_tag.with(a::stream_error));
         },
-        ReadTruncated9ByteTag = [128u8; 9] => |r| {
-            let result = r.read_tag();
-    
-            assert!(matches!(result, Err(Error::StreamError(stream::Error))));
+        (read_truncated_9byte_tag | read_truncated_9byte_tag_any) = [128u8; 9] => |r| {
+            r.then(a::try_read_tag.with(a::stream_error));
         },
-        ReadMalformedTag = [128u8; 10] => |r| {
-            let result = r.read_tag();
-
-            assert!(matches!(result, Err(Error::MalformedVarint)));
+        (read_malformed_tag | read_malformed_tag_any) = [128u8; 10] => |r| {
+            r.then(a::try_read_tag.with(a::malformed_varint));
+        },
+        (read_truncated_varint32_empty | read_truncated_varint32_empty_any) = [] => |r| {
+            r.then(a::read_varint32.with(a::stream_error));
+        },
+        (read_truncated_varint32_5byte | read_truncated_varint32_5byte_any) = [128u8; 5] => |r| {
+            r.then(a::read_varint32.with(a::stream_error));
+        },
+        (read_truncated_varint32_9byte | read_truncated_varint32_9byte_any) = [128u8; 9] => |r| {
+            r.then(a::read_varint32.with(a::stream_error));
+        },
+        (read_malformed_varint32 | read_malformed_varint32_any) = [128u8; 10] => |r| {
+            r.then(a::read_varint32.with(a::malformed_varint));
+        },
+        (read_varint32 | read_varint32_any) = [1] => |r| {
+            r.then(a::read_varint32.with(a::value(1)))
+             .then(a::read_tag::none());
+        },
+        (read_varint32_5byte | read_varint32_5byte_any) = [128, 128, 128, 128, 1] => |r| {
+            r.then(a::read_varint32.with(a::value(0x10000000)))
+             .then(a::read_tag::none());
+        },
+        (read_varint32_10byte | read_varint32_10byte_any) = [128, 128, 128, 128, 128, 128, 128, 128, 128, 1] => |r| {
+            r.then(a::read_varint32.with(a::value(0))) // discard all top bits
+             .then(a::read_tag::none());
+        },
+        (read_truncated_varint64_empty | read_truncated_varint64_empty_any) = [] => |r| {
+            r.then(a::read_varint64.with(a::stream_error));
+        },
+        (read_truncated_varint64_9byte | read_truncated_varint64_9byte_any) = [128u8; 9] => |r| {
+            r.then(a::read_varint64.with(a::stream_error));
+        },
+        (read_malformed_varint64 | read_malformed_varint64_any) = [128u8; 10] => |r| {
+            r.then(a::read_varint64.with(a::malformed_varint));
+        },
+        (read_varint64 | read_varint64_any) = [1] => |r| {
+            r.then(a::read_varint64.with(a::value(1)))
+             .then(a::read_tag::none());
+        },
+        (read_varint64_10byte | read_varint64_10byte_any) = [128, 128, 128, 128, 128, 128, 128, 128, 128, 1] => |r| {
+            r.then(a::read_varint64.with(a::value(0x8000000000000000)))
+             .then(a::read_tag::none());
+        },
+        (read_truncated_bit32 | read_truncated_bit32_any) = [] => |r| {
+            r.then(a::read_bit32.with(a::stream_error));
+        },
+        (read_truncated_bit32_3byte | read_truncated_bit32_3byte_any) = [0u8; 3] => |r| {
+            r.then(a::read_bit32.with(a::stream_error));
+        },
+        (read_bit32 | read_bit32_any) = [0x78, 0x56, 0x34, 0x12] => |r| {
+            r.then(a::read_bit32.with(a::value(0x12345678u32)))
+             .then(a::read_tag::none());
+        },
+        (read_truncated_bit64 | read_truncated_bit64_any) = [] => |r| {
+            r.then(a::read_bit64.with(a::stream_error));
+        },
+        (read_truncated_bit64_7byte | read_truncated_bit64_7byte_any) = [0u8; 7] => |r| {
+            r.then(a::read_bit64.with(a::stream_error));
+        },
+        (read_bit64 | read_bit64_any) = [0xEF, 0xCD, 0xAB, 0x90, 0x78, 0x56, 0x34, 0x12] => |r| {
+            r.then(a::read_bit64.with(a::value(0x1234567890ABCDEFu64)))
+             .then(a::read_tag::none());
         }
     }
 
     macro_rules! run {
         (
             $f:ty => {
-                $($t:ident => $tp:ident),*
+                $($t:ident),*
             }
         ) => {
             $(
                 #[test]
                 fn $t() {
-                    <crate::io::read::test::$tp as Case>::run_with::<$f>()
+                    crate::io::read::test::$t::<$f>();
                 }
             )*
         };
@@ -1347,76 +1881,93 @@ mod test {
         ($f:ty) => {
             run! {
                 $f => {
-                    read_no_tag_from_empty => ReadNoTagFromEmpty,
-                    read_tag => ReadTag,
-                    read_2byte_tag => Read2ByteTag,
-                    read_5byte_tag => Read5ByteTag,
-                    read_10byte_tag => Read10ByteTag,
-                    read_truncated_tag => ReadTruncatedTag,
-                    read_truncated_9byte_tag => ReadTruncated9ByteTag,
-                    read_malformed_tag => ReadMalformedTag
+                    read_no_tag_from_empty, read_no_tag_from_empty_any,
+                    read_tag, read_tag_any,
+                    read_2byte_tag, read_2byte_tag_any,
+                    read_5byte_tag, read_5byte_tag_any,
+                    read_10byte_tag, read_10byte_tag_any,
+                    read_truncated_tag, read_truncated_tag_any,
+                    read_truncated_9byte_tag, read_truncated_9byte_tag_any,
+                    read_malformed_tag, read_malformed_tag_any,
+                    read_truncated_varint32_empty, read_truncated_varint32_empty_any,
+                    read_truncated_varint32_5byte, read_truncated_varint32_5byte_any,
+                    read_truncated_varint32_9byte, read_truncated_varint32_9byte_any,
+                    read_malformed_varint32, read_malformed_varint32_any,
+                    read_varint32, read_varint32_any,
+                    read_varint32_5byte, read_varint32_5byte_any,
+                    read_varint32_10byte, read_varint32_10byte_any,
+                    read_truncated_varint64_empty, read_truncated_varint64_empty_any,
+                    read_truncated_varint64_9byte, read_truncated_varint64_9byte_any,
+                    read_malformed_varint64, read_malformed_varint64_any,
+                    read_varint64, read_varint64_any,
+                    read_varint64_10byte, read_varint64_10byte_any,
+                    read_truncated_bit32, read_truncated_bit32_any,
+                    read_truncated_bit32_3byte, read_truncated_bit32_3byte_any,
+                    read_bit32, read_bit32_any,
+                    read_truncated_bit64, read_truncated_bit64_any,
+                    read_truncated_bit64_7byte, read_truncated_bit64_7byte_any,
+                    read_bit64, read_bit64_any
                 }
             }
         };
     }
 
-    mod slice {
-        use crate::io::{stream, read::{Slice, Error, internal::Reader}};
-        use super::{ReaderInput, Checked, Case};
+    mod suites {
+        mod slice {
+            use crate::io::read::{Slice, CodedReader, test::{ReaderInput}};
 
-        impl Checked for Slice<'_> {
-            fn assert_is_valid(&self) {
-                assert!(self.start <= self.limit);
-                assert!(self.start <= self.end);
-            }
-        }
+            impl<'a> ReaderInput<'a> for Slice<'a> {
+                type Reader = Self;
 
-        impl<'a> ReaderInput<'a> for Slice<'a> {
-            type Reader = Self;
-
-            fn new(b: &'a [u8]) -> Self {
-                Slice::new(b)
-            }
-        }
-
-        run_suite!(Slice);
-    }
-
-    mod stream {
-        use crate::io::{stream, read::{self, Stream, Error, internal::Reader}};
-        use super::{ReaderInput, Checked, Case};
-
-        impl Checked for Stream<&'_ [u8]> {
-            fn assert_is_valid(&self) {
-                unimplemented!()
-            }
-        }
-
-        impl<'a> ReaderInput<'a> for Stream<&'a [u8]> {
-            type Reader = Self;
-
-            fn new(b: &'a [u8]) -> Self {
-                Stream::new(b, read::DEFAULT_BUF_SIZE)
-            }
-        }
-
-        run_suite!(Stream);
-
-        mod no_buffer {
-            use crate::io::{stream, read::{Stream, Error, internal::Reader}};
-            use super::{ReaderInput, Checked, Case};
-
-            pub struct StreamNoBuffer;
-
-            impl<'a> ReaderInput<'a> for StreamNoBuffer {
-                type Reader = Stream<&'a [u8]>;
-
-                fn new(b: &'a [u8]) -> Self::Reader {
-                    Stream::new(b, 0)
+                fn new(b: &'a [u8]) -> CodedReader<Self> {
+                    CodedReader::with_slice(b)
                 }
             }
 
-            run_suite!(StreamNoBuffer);
+            run_suite!(Slice);
+        }
+
+        mod stream {
+            macro_rules! stream_case {
+                ($i:ident($s:expr)) => {
+                    use crate::io::read::{CodedReader, Stream, test::ReaderInput};
+
+                    pub struct $i;
+
+                    impl<'a> ReaderInput<'a> for $i {
+                        type Reader = Stream<&'a [u8]>;
+
+                        fn new(b: &'a [u8]) -> CodedReader<Self::Reader> {
+                            CodedReader::with_capacity($s, b)
+                        }
+                    }
+                };
+            }
+
+            mod default {
+                stream_case!(StreamDefaultBuffer(crate::io::read::DEFAULT_BUF_SIZE));
+                run_suite!(StreamDefaultBuffer);
+            }
+
+            mod no_buffer {
+                stream_case!(StreamNoBuffer(0));
+                run_suite!(StreamNoBuffer);
+            }
+
+            mod byte1_buffer {
+                stream_case!(StreamTinyBuffer(1));
+                run_suite!(StreamTinyBuffer);
+            }
+
+            mod byte5_buffer {
+                stream_case!(StreamTinyBuffer(5));
+                run_suite!(StreamTinyBuffer);
+            }
+
+            mod byte10_buffer {
+                stream_case!(StreamTinyBuffer(10));
+                run_suite!(StreamTinyBuffer);
+            }
         }
     }
 }
