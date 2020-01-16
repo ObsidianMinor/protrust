@@ -34,7 +34,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// 
 /// Like the std::io::Read trait, implementors of this trait are called 'readers'.
 pub trait Read {
-    /// Reads from the input into the specified buffer, returning the number of bytes read. 
+    /// Reads from the input into the specified buffer, returning the number of bytes read.
     /// The input buffer is not guaranteed to be zeroed.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
 
@@ -43,8 +43,8 @@ pub trait Read {
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
 
     /// Skips a certain number of bytes from the input. If instance cannot skip the specified length,
-    /// this should return an [`Error`](struct.Error.html)
-    fn skip(&mut self, len: usize) -> Result<()>;
+    /// this should return an [`Error`](struct.Error.html). The provided `len` is guaranteed to not be negative.
+    fn skip(&mut self, len: i32) -> Result<()>;
 }
 
 #[cfg(not(feature = "std"))]
@@ -57,7 +57,7 @@ impl<R: Read + ?Sized> Read for &mut R {
         (**self).read_exact(buf)
     }
     #[inline]
-    fn skip(&mut self, len: usize) -> Result<()> {
+    fn skip(&mut self, len: i32) -> Result<()> {
         (**self).skip(len)
     }
 }
@@ -78,20 +78,37 @@ impl<T: ?Sized + std::io::Read> Read for T {
         unsafe { self.initializer().initialize(buf); }
         loop {
             match self.read(buf) {
-                Ok(0) if buf.is_empty() => break Err(Error),
-                Ok(0) => break Ok(()),
-                Ok(n) => { let tmp = buf; buf = &mut tmp[n..]; }
+                Ok(0) if buf.is_empty() => break Ok(()),
+                Ok(0) => break Err(Error),
+                Ok(n) => {
+                    let tmp = buf;
+                    buf = &mut tmp[n..];
+                    if buf.is_empty() {
+                        break Ok(())
+                    }
+                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => { },
                 Err(_) => break Err(Error),
             }
         }
     }
-    fn skip(&mut self, len: usize) -> Result<()> {
+    default fn skip(&mut self, len: i32) -> Result<()> {
         let mut by_ref = self;
         let mut take = <&mut T as std::io::Read>::take(&mut by_ref, len as u64);
         let mut sink = std::io::sink();
         std::io::copy(&mut take, &mut sink).map_err(|_| Error)?;
-        Ok(())
+        if take.limit() != 0 {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<T: ?Sized + std::io::Read + std::io::Seek> Read for T {
+    default fn skip(&mut self, len: i32) -> Result<()> {
+        self.seek(std::io::SeekFrom::Current(len as i64)).map(|_| ()).map_err(|_| Error)
     }
 }
 
@@ -112,15 +129,23 @@ impl<'a> Read for &'a [u8] {
         Ok(amt)
     }
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
-        match self.get(..buf.len()) {
-            Some(input) => {
-                buf.copy_from_slice(input);
-                Ok(())
-            },
-            None => Err(Error)
+        if buf.len() > self.len() {
+            return Err(Error);
         }
+        let (a, b) = self.split_at(buf.len());
+
+        // like std, this is here to avoid the copy_from_slice memcpy overhead
+        if buf.len() == 1 {
+            buf[0] = a[0];
+        } else {
+            buf.copy_from_slice(a);
+        }
+
+        *self = b;
+        Ok(())
     }
-    fn skip(&mut self, len: usize) -> Result<()> {
+    fn skip(&mut self, len: i32) -> Result<()> {
+        let len = len as usize;
         if len > self.len() {
             return Err(Error);
         }
@@ -173,7 +198,6 @@ impl Write for Vec<u8> {
 }
 
 #[cfg(test)]
-#[cfg(not(feature = "std"))]
 mod test {
     use crate::io::stream::{Write, Read, Error};
 
@@ -222,6 +246,37 @@ mod test {
 
         assert_eq!(result, Ok(0));
         assert_eq!(read, &data);
+    }
+    #[test]
+    fn read_exact() {
+        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let mut read: &[u8] = &data;
+        let result = read.read_exact(&mut []);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(read, &data);
+
+        let mut b1 = [0u8; 1];
+        let result = read.read_exact(&mut b1);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(&b1, &data[0..1]);
+        assert_eq!(read, &data[1..]);
+
+        let mut b4 = [0u8; 4];
+        let result = read.read_exact(&mut b4);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(&b4, &data[1..5]);
+        assert_eq!(read, &data[5..]);
+
+        let mut b5 = [0u8; 5];
+        let result = read.read_exact(&mut b5);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(&b5, &data[5..10]);
+        assert_eq!(read, &[]);
     }
     #[test]
     fn skip_all() {
@@ -331,148 +386,5 @@ mod test {
         assert_eq!(vec.len(), 20);
         assert_eq!(&vec[0..10], data);
         assert_eq!(&vec[10..20], data);
-    }
-}
-
-#[cfg(test)]
-#[cfg(feature = "std")]
-mod test {
-    use crate::io::stream::{Write, Read, Error};
-
-    #[test]
-    fn read_all() {
-        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut buf = [0u8; 10];
-
-        let mut read: &[u8] = &data;
-        let result = read.read(&mut buf);
-
-        assert_eq!(result, Ok(10));
-        assert_eq!(read, &[]);
-        assert_eq!(data, buf);
-    }
-    #[test]
-    fn read_less() {
-        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut buf = [0u8; 5];
-
-        let mut read: &[u8] = &data;
-        let result = read.read(&mut buf);
-
-        assert_eq!(result, Ok(5));
-        assert_eq!(read, &data[5..10]);
-        assert_eq!(&data[0..5], &buf);
-    }
-    #[test]
-    fn read_more() {
-        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut buf = [0u8; 11];
-
-        let mut read: &[u8] = &data;
-        let result = read.read(&mut buf);
-
-        assert_eq!(result, Ok(10));
-        assert_eq!(read, &[]);
-        assert_eq!(data, &buf[0..10]);
-    }
-    #[test]
-    fn read_none() {
-        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-        let mut read: &[u8] = &data;
-        let result = read.read(&mut []);
-
-        assert_eq!(result, Ok(0));
-        assert_eq!(read, &data);
-    }
-    #[test]
-    fn skip_all() {
-        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-        let mut read: &[u8] = &data;
-        let result = read.skip(10);
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(read, &[]);
-    }
-    #[test]
-    fn skip_less() {
-        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-        let mut read: &[u8] = &data;
-        let result = read.skip(5);
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(read, &data[5..10]);
-
-        let result = read.skip(5);
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(read, &[]);
-    }
-    #[test]
-    fn skip_more() {
-        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-        let mut read: &[u8] = &data;
-        let result = read.skip(11);
-
-        assert_eq!(result, Err(Error));
-    }
-    #[test]
-    fn skip_none() {
-        let data: [u8; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-        let mut read: &[u8] = &data;
-        let result = read.skip(0);
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(read, &data);
-    }
-
-    #[test]
-    fn write_all() {
-        let mut buf = [0u8; 10];
-        let data = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-        let mut write: &mut [u8] = &mut buf;
-        let result = write.write(data);
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(write, &mut []);
-        assert_eq!(&buf, data);
-    }
-    #[test]
-    fn write_less() {
-        let mut buf = [0u8; 10];
-        let data = &[1, 2, 3, 4, 5];
-
-        let mut write: &mut [u8] = &mut buf;
-        let result = write.write(data);
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(write.len(), 5);
-        assert_eq!(&buf[0..5], data);
-    }
-    #[test]
-    fn write_more() {
-        let mut buf = [0u8; 10];
-        let data = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-
-        let mut write: &mut [u8] = &mut buf;
-        let result = write.write(data);
-
-        assert_eq!(result, Err(Error));
-    }
-    #[test]
-    fn write_none() {
-        let mut buf = [0u8; 10];
-        let data = &[];
-
-        let mut write: &mut [u8] = &mut buf;
-        let result = write.write(data);
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(&*write, &[0u8; 10]);
     }
 }
