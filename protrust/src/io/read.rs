@@ -6,9 +6,6 @@ use core::cmp::{self, Ordering};
 use core::convert::TryFrom;
 use core::fmt::{self, Display, Formatter};
 use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
-use core::ops;
-use core::ptr::NonNull;
 use core::result;
 use crate::collections::{RepeatedValue, FieldSet, TryRead};
 use crate::extend::ExtensionRegistry;
@@ -27,7 +24,7 @@ mod internal {
     use core::ops::Range;
     use core::ptr::{self, NonNull};
     use core::result;
-    use crate::io::{ByteString, Length, internal::Array, stream::{self, Read}, read::{Result, Error}};
+    use crate::io::{ByteString, Tag, Length, internal::Array, stream::{self, Read}, read::{Result, Error}};
 
     /// A container for shared buffer manipulation logic.
     /// This does not track the lifetime of the buffer,
@@ -155,6 +152,9 @@ mod internal {
     }
 
     pub trait Reader {
+        fn last_tag(&self) -> Option<Tag>;
+        fn last_tag_mut(&mut self) -> &mut Option<Tag>;
+
         fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>>;
         fn pop_limit(&mut self, old: Option<i32>);
         fn reached_limit(&self) -> bool;
@@ -172,42 +172,27 @@ mod internal {
         fn skip_length_delimited(&mut self) -> Result<()>;
 
         fn as_any(&mut self) -> Any;
-        fn from_any<'a>(&'a mut self, any: Any<'a>);
 
         fn reached_end(&self) -> bool;
+    }
+
+    pub struct BorrowedStream<'a> {
+        pub input: &'a mut dyn Read,
+        pub buf: &'a mut [u8],
+        pub remaining_limit: &'a mut i32,
+        pub reached_eof: &'a mut bool,
     }
 
     /// Represents any input type for a CodedReader. This is slower than a
     /// generic stream input or slice, but is more flexible and can be used 
     /// in cases where the input or message type is unknown.
     pub struct Any<'a> {
-        pub(super) stream: Option<(&'a mut dyn Read, &'a mut [u8])>,
-        /// Values < 0 indicate no limit
-        pub(super) remaining_limit: i32,
-        pub(super) buffer: Buffer,
-
-        pub(super) reached_end: bool
+        pub(super) stream: Option<BorrowedStream<'a>>,
+        pub(super) buffer: &'a mut Buffer,
+        pub(super) last_tag: &'a mut Option<Tag>,
     }
 
     impl Any<'_> {
-        /// Drops any borrowed data in the Any leaving only static fields
-        pub(super) fn into_unbound<'a>(self) -> Any<'a> {
-            Any {
-                stream: None,
-                remaining_limit: self.remaining_limit,
-                buffer: self.buffer,
-                reached_end: self.reached_end
-            }
-        }
-        #[inline]
-        fn remaining_limit(&self) -> Option<i32> {
-            if self.remaining_limit < 0 {
-                None
-            } else {
-                let len = self.buffer.to_limit_len() as i32;
-                Some(i32::wrapping_add(self.remaining_limit, len))
-            }
-        }
         fn read_buffer_partial<'a>(&mut self, slice: &'a mut [u8]) -> Result<&'a mut [u8]> {
             // check if we reached the end of the buffer
             // does not check if we've reached end of limit
@@ -216,7 +201,12 @@ mod internal {
             }
 
             let limit_len = self.buffer.to_limit_len();
-            if self.remaining_limit <= 0 {
+            let buffer_has_all = 
+                self.stream
+                    .as_ref()
+                    .map_or(true,
+                        |BorrowedStream { remaining_limit, .. }| **remaining_limit <= 0);
+            if buffer_has_all {
                 if limit_len < slice.len() {
                     unsafe { self.buffer.advance(limit_len); }
                     return Err(stream::Error.into());
@@ -256,19 +246,19 @@ mod internal {
         }
         /// Attempts to refresh the buffer, returning a bool indicating if the data buffer was filled
         fn try_refresh(&mut self) -> Result<bool> {
-            let (src, buf) = match &mut self.stream {
-                Some(t) => t,
+            let BorrowedStream { input, buf, remaining_limit, reached_eof } = match &mut self.stream {
+                Some(s) => s,
                 None => return Err(stream::Error.into()),
             };
-            let amnt = src.read(buf)?;
+            let amnt = input.read(buf)?;
 
-            self.buffer = Buffer::from_slice(&buf[..amnt]);
-            if self.remaining_limit >= 0 {
-                self.remaining_limit = unsafe { self.buffer.apply_partial_limit(self.remaining_limit) };
+            *self.buffer = Buffer::from_slice(&buf[..amnt]);
+            if **remaining_limit >= 0 {
+                **remaining_limit = unsafe { self.buffer.apply_partial_limit(**remaining_limit) };
             }
 
             let refreshed = amnt != 0;
-            self.reached_end = !refreshed;
+            **reached_eof = !refreshed;
             Ok(refreshed)
         }
         fn refresh(&mut self) -> Result<()> {
@@ -280,50 +270,50 @@ mod internal {
             Ok(buf[0])
         }
         fn try_read_byte(&mut self) -> Result<Option<u8>> {
-            if self.reached_end {
+            if self.reached_end() {
                 return Ok(None);
             }
 
             if self.buffer.to_limit_len() != 0 {
                 unsafe { Ok(Some(self.buffer.next_byte())) }
-            } else if self.remaining_limit == 0 {
-                Ok(None)
             } else {
-                match self.stream {
-                    Some((ref mut src, [])) => {
+                match &mut self.stream {
+                    Some(BorrowedStream { remaining_limit: &mut 0, .. }) | None => Ok(None),
+                    Some(BorrowedStream { input, buf: [], remaining_limit, reached_eof }) => {
                         let mut buf = [0u8; 1];
-                        let result = src.read(&mut buf)?;
+                        let result = input.read(&mut buf)?;
                         if result != 0 {
-                            if self.remaining_limit > 0 {
-                                self.remaining_limit -= 1;
+                            if **remaining_limit > 0 {
+                                **remaining_limit -= 1;
                             }
                             Ok(Some(buf[0]))
                         } else {
+                            **reached_eof = true;
                             Ok(None)
                         }
                     },
-                    _ => {
+                    Some(_) => {
                         self.try_refresh()
                             .map(|b| b.then(|| unsafe { self.buffer.next_byte() }))
                             .map_err(Into::into)
-                    }
+                    },
                 }
             }
         }
         fn read_exact(&mut self, slice: &mut [u8]) -> Result<()> {
-            if self.reached_end {
+            if self.reached_end() {
                 return Err(stream::Error.into());
             }
 
             let mut remaining_slice = self.read_buffer_partial(slice)?;
 
             if !remaining_slice.is_empty() {
-                if let Some((ref mut src, ref buf)) = self.stream {
+                if let Some(BorrowedStream { input, buf, remaining_limit, .. }) = &mut self.stream {
                     // if the remaining amnt to read is more than or equal to
                     // the size of the buffer then we read direct from the stream
                     // and adjust our remaining limit accordingly
                     if remaining_slice.len() >= buf.len() {
-                        Self::read_direct(*src, remaining_slice, &mut self.remaining_limit)?;
+                        Self::read_direct(input, remaining_slice, remaining_limit)?;
                     } else {
                         loop {
                             self.refresh()?;
@@ -344,11 +334,11 @@ mod internal {
             }
         }
         fn skip(&mut self, amnt: i32) -> Result<()> {
-            let amnt_usize = amnt as usize;
-            if self.reached_end {
+            if self.reached_end() {
                 return Err(stream::Error.into());
             }
 
+            let amnt_usize = amnt as usize;
             let limit_buf_len = self.buffer.to_limit_len();
             if limit_buf_len >= amnt_usize {
                 unsafe { self.buffer.advance(amnt_usize); }
@@ -356,74 +346,115 @@ mod internal {
             } else {
                 unsafe { self.buffer.advance(limit_buf_len); }
                 let remaining_amnt = amnt - limit_buf_len as i32;
-                match self.remaining_limit.cmp(&0) {
-                    Ordering::Less => {
-                        match self.stream {
-                            Some((ref mut src, _)) => src.skip(remaining_amnt).map_err(Into::into),
-                            None => Err(stream::Error.into())
+                match &mut self.stream {
+                    Some(BorrowedStream { input, remaining_limit, .. }) => {
+                        match (**remaining_limit).cmp(&0) {
+                            Ordering::Less => {
+                                input.skip(remaining_amnt).map_err(Into::into)
+                            },
+                            Ordering::Equal => Err(stream::Error.into()),
+                            Ordering::Greater => {
+                                let remaining = **remaining_limit;
+                                if remaining > remaining_amnt {
+                                    **remaining_limit = 0;
+                                    input.skip(remaining).map_err(Into::into)
+                                } else {
+                                    **remaining_limit = i32::wrapping_sub(**remaining_limit, remaining_amnt as i32);
+                                    input.skip(remaining_amnt).map_err(Into::into)
+                                }
+                            }
                         }
                     },
-                    Ordering::Equal => Err(stream::Error.into()),
-                    Ordering::Greater => {
-                        match self.stream {
-                            Some((ref mut src, _)) => {
-                                let remaining_limit = self.remaining_limit;
-                                if remaining_limit > remaining_amnt {
-                                    self.remaining_limit = 0;
-                                    src.skip(remaining_limit).map_err(Into::into)
-                                } else {
-                                    self.remaining_limit = i32::wrapping_sub(self.remaining_limit, remaining_amnt as i32);
-                                    src.skip(remaining_amnt).map_err(Into::into)
-                                }
-                            },
-                            None => unreachable!()
-                        }
-                    }
+                    None => Err(stream::Error.into()),
                 }
             }
         }
     }
 
-    impl Reader for Any<'_> {
+    impl<'a> Reader for Any<'a> {
+        fn last_tag(&self) -> Option<Tag> {
+            *self.last_tag
+        }
+        fn last_tag_mut(&mut self) -> &mut Option<Tag> {
+            self.last_tag
+        }
+
         fn push_limit(&mut self, limit: i32) -> result::Result<Option<i32>, stream::Error> {
-            let remaining = self.remaining_limit().map(|r| i32::wrapping_sub(r, limit));
-            let failed_len_check = 
-                if let Some(r) = remaining {
-                    // we fail this check if our remaining limit is less than
-                    // the new limit
-                    r < 0
-                } else if self.stream.is_none() {
-                    // we also fail if we're reading directly from a buffer and
-                    // the size of the buffer is less than the limit
-                    match i32::try_from(self.buffer.to_end_len()) {
-                        Ok(r) => r < limit,
-                        Err(_) => false,
+            match &mut self.stream {
+                Some(BorrowedStream { remaining_limit, .. }) => {
+                    if **remaining_limit < 0 {
+                        let limit_len = self.buffer.to_limit_len();
+                        if let Ok(end) = i32::try_from(limit_len) {
+                            if limit > end {
+                                Err(stream::Error.into())
+                            } else {
+                                **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
+                                Ok(None)
+                            }
+                        } else {
+                            **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
+                            Ok(None)
+                        }
+                    } else {
+                        Ok(Some(0))
                     }
-                } else { 
-                    false
-                };
-            if failed_len_check {
-                Err(stream::Error)
-            } else {
-                self.remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
-                Ok(remaining)
+                },
+                None => {
+                    if let Some(existing_limit) = self.buffer.remaining_limit() {
+                        if limit > existing_limit {
+                            Err(stream::Error.into())
+                        } else {
+                            let old = existing_limit - limit;
+                            unsafe { self.buffer.apply_limit(limit) };
+                            Ok(Some(old))
+                        }
+                    } else {
+                        let limit_len = self.buffer.to_limit_len();
+                        unsafe {
+                            if let Ok(end) = i32::try_from(limit_len) {
+                                if limit > end {
+                                    Err(stream::Error.into())
+                                } else {
+                                    self.buffer.apply_limit(limit);
+                                    Ok(None)
+                                }
+                            } else {
+                                self.buffer.apply_limit(limit);
+                                Ok(None)
+                            }
+                        }
+                    }
+                }
             }
         }
         fn pop_limit(&mut self, old: Option<i32>) {
             unsafe {
-                match old {
-                    Some(old) => {
-                        self.remaining_limit = self.buffer.apply_partial_limit(old);
+                match &mut self.stream {
+                    Some(BorrowedStream { remaining_limit, .. }) => {
+                        match old {
+                            Some(old) => {
+                                **remaining_limit = self.buffer.apply_partial_limit(old);
+                            },
+                            None => {
+                                self.buffer.remove_limit();
+                                **remaining_limit = -1;
+                            }
+                        }
                     },
                     None => {
-                        self.buffer.remove_limit();
-                        self.remaining_limit = -1;
+                        match old {
+                            Some(old) => self.buffer.apply_limit(old),
+                            None => self.buffer.remove_limit(),
+                        }
                     }
                 }
             }
         }
         fn reached_limit(&self) -> bool {
-            self.buffer.reached_limit() && self.remaining_limit == 0
+            match &self.stream {
+                Some(BorrowedStream { remaining_limit, ..}) => self.buffer.reached_limit() && **remaining_limit == 0,
+                None => self.buffer.reached_limit()
+            }
         }
 
         #[inline]
@@ -527,22 +558,23 @@ mod internal {
             }
         }
 
-        fn as_any<'a>(&'a mut self) -> Any<'a> {
+        fn as_any(&mut self) -> Any {
             Any {
-                stream: self.stream.as_mut().map::<(&'a mut dyn Read, &'a mut [u8]), _>(|(s, b)| (*s, *b)),
-                remaining_limit: self.remaining_limit,
-                buffer: self.buffer,
-                reached_end: self.reached_end,
+                stream: 
+                    self.stream
+                        .as_mut()
+                        .map(|BorrowedStream { input, buf, remaining_limit, reached_eof }|
+                              BorrowedStream { input, buf, remaining_limit, reached_eof }),
+                buffer: &mut self.buffer,
+                last_tag: &mut self.last_tag
             }
-        }
-        fn from_any<'a>(&'a mut self, any: Any<'a>) {
-            self.remaining_limit = any.remaining_limit;
-            self.buffer = any.buffer;
-            self.reached_end = self.reached_end;
         }
 
         fn reached_end(&self) -> bool {
-            self.reached_end
+            match &self.stream {
+                Some(BorrowedStream { reached_eof, .. }) => **reached_eof && self.buffer.reached_end(),
+                None => self.buffer.reached_end()
+            }
         }
     }
 
@@ -653,19 +685,28 @@ impl<T: internal::Reader> Input for T { }
 /// [`CodedReader`]: struct.CodedReader.html
 pub struct Slice<'a> {
     a: PhantomData<&'a [u8]>,
-    buffer: Buffer
+    buffer: Buffer,
+    last_tag: Option<Tag>,
 }
 
 impl<'a> Slice<'a> {
     fn new(value: &'a [u8]) -> Self {
         Self {
             a: PhantomData,
-            buffer: Buffer::from_slice(value)
+            buffer: Buffer::from_slice(value),
+            last_tag: None
         }
     }
 }
 
 impl Reader for Slice<'_> {
+    fn last_tag(&self) -> Option<Tag> {
+        self.last_tag
+    }
+    fn last_tag_mut(&mut self) -> &mut Option<Tag> {
+        &mut self.last_tag
+    }
+
     fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>> {
         let old = match self.buffer.remaining_limit() {
             Some(remaining) => {
@@ -784,7 +825,7 @@ impl Reader for Slice<'_> {
     fn read_bit32(&mut self) -> Result<u32> {
         self.buffer.try_limited_as_array()
             .ok_or(Error::StreamError(stream::Error))
-            .map(|&arr| arr)
+            .copied()
             .map(|arr| {
                 unsafe { self.buffer.advance(4); } // since we already got the array, we know we have at least 4 bytes
                 u32::from_le_bytes(arr)
@@ -793,7 +834,7 @@ impl Reader for Slice<'_> {
     fn read_bit64(&mut self) -> Result<u64> {
         self.buffer.try_limited_as_array()
             .ok_or(Error::StreamError(stream::Error))
-            .map(|&arr| arr)
+            .copied()
             .map(|arr| {
                 unsafe { self.buffer.advance(8); } // since we already got the array, we know we have at least 8 bytes
                 u64::from_le_bytes(arr)
@@ -870,13 +911,9 @@ impl Reader for Slice<'_> {
     fn as_any(&mut self) -> Any {
         Any {
             stream: None,
-            remaining_limit: 0,
-            buffer: self.buffer,
-            reached_end: self.reached_end()
+            buffer: &mut self.buffer,
+            last_tag: &mut self.last_tag
         }
-    }
-    fn from_any<'a>(&'a mut self, any: Any<'a>) {
-        self.buffer = any.buffer;
     }
 
     fn reached_end(&self) -> bool {
@@ -895,7 +932,8 @@ pub struct Stream<T> {
     buf: Box<[u8]>,
     buffer: Buffer,
     remaining_limit: i32,
-    reached_end: bool
+    reached_eof: bool,
+    last_tag: Option<Tag>,
 }
 
 impl<T: Read> Stream<T> {
@@ -908,7 +946,8 @@ impl<T: Read> Stream<T> {
             buf,
             buffer,
             remaining_limit: -1,
-            reached_end: false
+            reached_eof: false,
+            last_tag: None
         }
     }
     fn into_inner(self) -> T {
@@ -926,7 +965,7 @@ impl<T: Read> Stream<T> {
         }
 
         let refreshed = amnt != 0;
-        self.reached_end = !refreshed;
+        self.reached_eof = !refreshed;
         Ok(refreshed)
     }
     fn refresh(&mut self) -> Result<()> {
@@ -981,7 +1020,7 @@ impl<T: Read> Stream<T> {
         }
     }
     fn read_exact(&mut self, slice: &mut [u8]) -> Result<()> {
-        if self.reached_end {
+        if self.reached_end() {
             return Err(stream::Error.into());
         }
 
@@ -1008,7 +1047,7 @@ impl<T: Read> Stream<T> {
     }
     fn skip(&mut self, amnt: i32) -> Result<()> {
         let amnt_usize = amnt as usize;
-        if self.reached_end {
+        if self.reached_end() {
             return Err(stream::Error.into());
         }
 
@@ -1043,7 +1082,7 @@ impl<T: Read> Stream<T> {
     /// This assumes that the limit hasn't been reached yet and
     /// is being used in conjunction with try_peek_byte which checks this and advance(1).
     fn try_read_byte(&mut self) -> Result<Option<u8>> {
-        if self.reached_end {
+        if self.reached_end() {
             return Ok(None);
         }
 
@@ -1076,6 +1115,13 @@ impl<T: Read> Stream<T> {
 }
 
 impl<T: Read> Reader for Stream<T> {
+    fn last_tag(&self) -> Option<Tag> {
+        self.last_tag
+    }
+    fn last_tag_mut(&mut self) -> &mut Option<Tag> {
+        &mut self.last_tag
+    }
+
     fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>> {
         let old = match self.remaining_limit() {
             Some(remaining) => {
@@ -1208,20 +1254,19 @@ impl<T: Read> Reader for Stream<T> {
 
     fn as_any(&mut self) -> Any {
         Any {
-            stream: Some((&mut self.input, &mut self.buf)),
-            remaining_limit: self.remaining_limit,
-            buffer: self.buffer,
-            reached_end: self.reached_end
+            stream: Some(internal::BorrowedStream {
+                input: &mut self.input,
+                buf: &mut self.buf,
+                remaining_limit: &mut self.remaining_limit,
+                reached_eof: &mut self.reached_eof,
+            }),
+            buffer: &mut self.buffer,
+            last_tag: &mut self.last_tag
         }
-    }
-    fn from_any<'a>(&'a mut self, any: Any<'a>) {
-        self.remaining_limit = any.remaining_limit;
-        self.buffer = any.buffer;
-        self.reached_end = any.reached_end;
     }
 
     fn reached_end(&self) -> bool {
-        self.reached_end
+        self.reached_eof && self.buffer.reached_end()
     }
 }
 
@@ -1296,7 +1341,6 @@ impl Builder {
     pub fn with_slice<'a>(&self, inner: &'a [u8]) -> CodedReader<Slice<'a>> {
         CodedReader {
             inner: Slice::new(inner),
-            last_tag: None,
             options: self.options.clone()
         }
     }
@@ -1312,62 +1356,7 @@ impl Builder {
     pub fn with_capacity<T: Read>(&self, capacity: usize, inner: T) -> CodedReader<Stream<T>> {
         CodedReader {
             inner: Stream::new(inner, capacity),
-            last_tag: None,
             options: self.options.clone()
-        }
-    }
-}
-
-/// Provides a bridge for a generic [`CodedReader`] to be converted
-/// to a [`CodedReader`]`<`[`Any`]`>` and vice versa.
-/// 
-/// This allows certain code to bridge gaps where not all merge functions
-/// can be generic over an input like extension or reflection contexts.
-/// 
-/// [`CodedReader`]: struct.CodedReader.html
-/// [`Any`]: struct.Any.html
-pub struct AnyConverter<'a, T: Input + 'a> {
-    src: NonNull<CodedReader<T>>,
-    brdg: ManuallyDrop<CodedReader<Any<'a>>>
-}
-
-impl<'a, T: Input> AnyConverter<'a, T> {
-    fn new(src: &'a mut CodedReader<T>) -> Self {
-        let src_ptr = unsafe { NonNull::new_unchecked(src) }; // don't use from since the borrow moves into the from call
-        let brdg = 
-            CodedReader {
-                inner: src.inner.as_any(),
-                last_tag: src.last_tag,
-                options: src.options.clone()
-            };
-        Self {
-            src: src_ptr,
-            brdg: ManuallyDrop::new(brdg)
-        }
-    }
-}
-
-impl<'a, T: Input> ops::Deref for AnyConverter<'a, T> {
-    type Target = CodedReader<Any<'a>>;
-
-    fn deref(&self) -> &CodedReader<Any<'a>> {
-        &self.brdg
-    }
-}
-
-impl<'a, T: Input> ops::DerefMut for AnyConverter<'a, T> {
-    fn deref_mut(&mut self) -> &mut CodedReader<Any<'a>> {
-        &mut self.brdg
-    }
-}
-
-impl<'a, T: Input> Drop for AnyConverter<'a, T> {
-    fn drop(&mut self) {
-        unsafe {
-            let src: &'a mut CodedReader<T> = &mut *self.src.as_ptr();
-
-            src.last_tag = self.brdg.last_tag;
-            src.inner.from_any(ManuallyDrop::take(&mut self.brdg).inner.into_unbound());
         }
     }
 }
@@ -1392,7 +1381,7 @@ impl<'a, T: Input + 'a> FieldReader<'a, T> {
     #[inline]
     pub fn read_value<F: FnOnce(&mut CodedReader<T>) -> Result<()>>(self, tag: Tag, f: F) -> Result<()> {
         debug_assert_eq!(self.tag, tag.get(), "Provided tag does not match read tag value");
-        self.inner.last_tag = Some(tag);
+        self.inner.set_last_tag(Some(tag));
 
         f(self.inner)
     }
@@ -1401,7 +1390,7 @@ impl<'a, T: Input + 'a> FieldReader<'a, T> {
     #[inline]
     pub fn check_and_read_value<F: FnOnce(&mut CodedReader<T>) -> Result<()>>(self, f: F) -> Result<()> {
         let tag = Tag::try_from(self.tag).map_err(|_| Error::InvalidTag(self.tag))?;
-        self.inner.last_tag = Some(tag);
+        self.inner.set_last_tag(Some(tag));
 
         f(self.inner)
     }
@@ -1437,7 +1426,6 @@ impl<'a, T: Input + 'a> Drop for Limit<'a, T> {
 /// A protobuf coded input reader that reads from a specified input.
 pub struct CodedReader<T: Input> {
     inner: T,
-    last_tag: Option<Tag>,
     options: ReaderOptions,
 }
 
@@ -1496,12 +1484,18 @@ impl<T: Input> CodedReader<T> {
     }
     /// Gets the last tag read by the reader.
     pub fn last_tag(&self) -> Option<Tag> {
-        self.last_tag
+        self.inner.last_tag()
+    }
+    fn set_last_tag(&mut self, tag: Option<Tag>) {
+        *self.inner.last_tag_mut() = tag;
     }
     /// Returns an [`AnyConverter`] that can be used to temporarily 
     /// convert the reader into a non-generic reader over [`Any`] input.
-    pub fn as_any(&mut self) -> AnyConverter<T> {
-        AnyConverter::new(self)
+    pub fn as_any(&mut self) -> CodedReader<Any> {
+        CodedReader {
+            inner: self.inner.as_any(),
+            options: self.options.clone()
+        }
     }
 
     /// Reads a length value from the input.
@@ -1527,11 +1521,13 @@ impl<T: Input> CodedReader<T> {
 
     /// Reads a field tag from the input
     pub fn read_tag(&mut self) -> Result<Option<Tag>> {
-        self.last_tag = 
+        let tag = 
             self.inner.read_tag()?
                 .map(|v| Tag::try_from(v).map_err(|_| Error::InvalidTag(v)))
                 .transpose()?;
-        Ok(self.last_tag)
+        self.set_last_tag(tag);
+
+        Ok(tag)
     }
     /// Reads a 32-bit varint field value. This is functionally similar to [`read_varint64`](#method.read_varint64),
     /// but is optimised for 32-bit values and will discard any top bits from 64-bit values.

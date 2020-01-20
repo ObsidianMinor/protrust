@@ -582,10 +582,12 @@ impl<T: ExtendableMessage + 'static> FieldSet for ExtensionSet<T> {
             })
     }
     fn write_to<U: Output>(&self, output: &mut CodedWriter<U>) -> write::Result {
-        let mut output = output.as_any();
-        for field in self.by_num.values() {
-            output.write_tag(field.tag())?;
-            field.write_to(&mut output)?;
+        if !self.by_num.is_empty() {
+            let mut output = output.as_any();
+            for field in self.by_num.values() {
+                output.write_tag(field.tag())?;
+                field.write_to(&mut output)?;
+            }
         }
         Ok(())
     }

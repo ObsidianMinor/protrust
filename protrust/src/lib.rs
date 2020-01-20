@@ -12,6 +12,7 @@
 #![feature(bool_to_option)]
 #![feature(vec_drain_as_slice)]
 #![feature(exact_size_is_empty)]
+#![feature(result_copied)]
 
 #![warn(missing_docs)]
 
