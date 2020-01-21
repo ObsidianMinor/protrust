@@ -1596,7 +1596,7 @@ impl<T: Input> CodedReader<T> {
     /// Adds field entries from the reader to the specified value.
     /// This is the inverse of `RepeatedValue::add_entries_from`.
     #[inline]
-    pub fn add_entries_to<U, V: RepeatedValue<U>>(&mut self, value: &mut V) -> Result<()> {
+    pub fn add_entries_to<U: RepeatedValue<V>, V>(&mut self, value: &mut U) -> Result<()> {
         value.add_entries_from(self)
     }
     /// Tries to add the field value to the field set.

@@ -310,8 +310,8 @@ impl Length {
     }
 
     /// Returns the length of the set of values with the specified tag
-    pub fn of_values<T: RepeatedValue<V>, V>(value: &T, tag: Tag) -> Option<Length> {
-        LengthBuilder::new().add_values::<T, V>(value, tag).map(LengthBuilder::build)
+    pub fn of_values<T: RepeatedValue<V>, V>(value: &T, num: FieldNumber) -> Option<Length> {
+        LengthBuilder::new().add_values::<T, V>(value, num).map(LengthBuilder::build)
     }
 
     /// Returns the length of the field set
@@ -366,8 +366,8 @@ impl LengthBuilder {
     /// Adds a value collection's length to this instance with the specified tag
     #[inline]
     #[must_use = "this returns the builder to chain and does not mutate it in place"]
-    pub fn add_values<T: RepeatedValue<V>, V>(self, value: &T, tag: Tag) -> Option<Self> {
-        value.calculate_size(self, tag)
+    pub fn add_values<T: RepeatedValue<V>, V>(self, value: &T, num: FieldNumber) -> Option<Self> {
+        value.calculate_size(self, num)
     }
 
     /// Adds the length of the fields in the set to this instance

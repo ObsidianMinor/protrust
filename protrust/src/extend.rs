@@ -9,8 +9,8 @@ use core::mem;
 use crate::Mergable;
 use crate::collections::{RepeatedField, FieldSet, TryRead};
 use crate::internal::Sealed;
-use crate::io::{read::{self, Input}, write::{self, Output}, FieldNumber, Tag, WireType, LengthBuilder, CodedReader, CodedWriter};
-use crate::raw::Value;
+use crate::io::{read::{self, Input}, write::{self, Output}, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
+use crate::raw::{Value, Packable, Packed};
 use hashbrown::{HashMap, hash_map::{self, DefaultHashBuilder}};
 use trapper::Wrapper;
 
@@ -20,13 +20,13 @@ mod internal {
     use core::fmt::{self, Debug, Formatter};
     use crate::{Mergable, merge};
     use crate::collections::{RepeatedField, RepeatedValue};
-    use crate::io::{read, write, Tag, WireType, LengthBuilder, CodedReader, CodedWriter};
-    use crate::raw::Value;
-    use super::{ExtendableMessage, alt_tag};
+    use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
+    use crate::raw::{Value, Packable, Packed};
+    use super::ExtendableMessage;
     use trapper::Wrapper;
 
     pub trait ExtensionIdentifier: Sync {
-        fn tag(&self) -> Tag;
+        fn field_number(&self) -> FieldNumber;
         fn message_type(&self) -> TypeId;
 
         fn try_read_value(&self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<Box<dyn AnyExtension>>>;
@@ -50,7 +50,7 @@ mod internal {
         fn clone_into_box(&self) -> Box<dyn AnyExtension>;
         fn merge(&mut self, other: &dyn AnyExtension);
         fn eq(&self, other: &dyn AnyExtension) -> bool;
-        fn tag(&self) -> Tag;
+        fn field_number(&self) -> FieldNumber;
 
         fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>>;
         fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
@@ -60,7 +60,7 @@ mod internal {
 
     pub struct ExtensionValue<V: Wrapper> {
         pub value: V::Inner,
-        pub tag: Tag,
+        pub num: FieldNumber,
     }
 
     impl<V: Wrapper> AsRef<V::Inner> for ExtensionValue<V> {
@@ -84,7 +84,7 @@ mod internal {
             Box::new(
                 Self {
                     value: self.value.clone(),
-                    tag: self.tag
+                    num: self.num
                 }
             )
         }
@@ -100,30 +100,20 @@ mod internal {
             let other: &Self = unsafe { &*(other as *const dyn AnyExtension as *const Self) };
             self.value.eq(&other.value)
         }
-        fn tag(&self) -> Tag { self.tag }
+        fn field_number(&self) -> FieldNumber { self.num }
 
         fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>> {
-            if Some(self.tag()) == input.last_tag() {
+            if Some(Tag::new(self.num, V::WIRE_TYPE)) == input.last_tag() {
                 input.merge_value::<V>(&mut self.value).map(TryReadValue::Consumed)
             } else {
                 Ok(TryReadValue::Yielded)
             }
         }
         fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-            let builder = builder.add_tag(self.tag)?.add_value::<V>(&self.value)?;
-            if self.tag.wire_type() == WireType::StartGroup {
-                builder.add_tag(self.tag) // end tag is same size as start tag
-            } else {
-                Some(builder)
-            }
+            builder.add_field::<V>(self.num, &self.value)
         }
         fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result {
-            output.write_tag(self.tag)?;
-            output.write_value::<V>(&self.value)?;
-            if self.tag.wire_type() == WireType::EndGroup {
-                output.write_tag(Tag::new(self.tag.number(), WireType::EndGroup))?;
-            }
-            Ok(())
+            output.write_field::<V>(self.num, &self.value)
         }
         fn is_initialized(&self) -> bool {
             V::wrap_ref(&self.value).is_initialized()
@@ -142,7 +132,7 @@ mod internal {
 
     pub struct RepeatedExtensionValue<V: Wrapper> {
         pub value: RepeatedField<V::Inner>,
-        pub tag: Tag,
+        pub num: FieldNumber,
     }
 
     impl<V: Wrapper> AsRef<RepeatedField<V::Inner>> for RepeatedExtensionValue<V> {
@@ -157,14 +147,16 @@ mod internal {
         }
     }
 
-    impl<V: Value + Wrapper + 'static> AnyExtension for RepeatedExtensionValue<V>
-        where V::Inner: Clone + PartialEq + Debug + Send + Sync
+    impl<V> AnyExtension for RepeatedExtensionValue<V>
+        where
+            V: Value + Wrapper + 'static,
+            V::Inner: Clone + PartialEq + Debug + Send + Sync
     {
         fn clone_into_box(&self) -> Box<dyn AnyExtension> {
             Box::new(
                 Self {
                     value: self.value.clone(),
-                    tag: self.tag,
+                    num: self.num,
                 }
             )
         }
@@ -182,24 +174,72 @@ mod internal {
             let other: &Self = unsafe { &*(other as *const dyn AnyExtension as *const Self) };
             self.value.eq(&other.value)
         }
-        fn tag(&self) -> Tag { self.tag }
+        fn field_number(&self) -> FieldNumber { self.num }
 
         fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>> {
             let tag = input.last_tag().unwrap();
-            if self.tag == tag || (V::WIRE_TYPE.is_packable() && alt_tag::<V>(self.tag) == tag) {
-                input.add_entries_to::<V, _>(&mut self.value).map(TryReadValue::Consumed)
+            if Tag::new(self.num, V::WIRE_TYPE) == tag || (V::WIRE_TYPE.is_packable() && Tag::new(self.num, WireType::LengthDelimited) == tag) {
+                input.add_entries_to::<_, V>(&mut self.value).map(TryReadValue::Consumed)
             } else {
                 Ok(TryReadValue::Yielded)
             }
         }
         fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-            builder.add_values::<_, V>(&self.value, self.tag)
+            builder.add_values::<_, V>(&self.value, self.num)
         }
         fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result {
-            RepeatedValue::<V>::write_to(&self.value, output, self.tag)
+            RepeatedValue::<V>::write_to(&self.value, output, self.num)
         }
         fn is_initialized(&self) -> bool {
             RepeatedValue::<V>::is_initialized(&self.value)
+        }
+    }
+
+    impl<V> AnyExtension for RepeatedExtensionValue<Packed<V>>
+        where
+            V: Value + Packable + Wrapper + 'static,
+            V::Inner: Clone + PartialEq + Debug + Send + Sync
+    {
+        fn clone_into_box(&self) -> Box<dyn AnyExtension> {
+            Box::new(
+                Self {
+                    value: self.value.clone(),
+                    num: self.num,
+                }
+            )
+        }
+        fn merge(&mut self, other: &dyn AnyExtension) {
+            assert_eq!(TypeId::of::<Self>(), other.type_id());
+
+            #[allow(clippy::cast_ptr_alignment)]
+            let other: &Self = unsafe { &*(other as *const dyn AnyExtension as *const Self) };
+            merge(&mut self.value, &other.value);
+        }
+        fn eq(&self, other: &dyn AnyExtension) -> bool {
+            assert_eq!(TypeId::of::<Self>(), other.type_id());
+
+            #[allow(clippy::cast_ptr_alignment)]
+            let other: &Self = unsafe { &*(other as *const dyn AnyExtension as *const Self) };
+            self.value.eq(&other.value)
+        }
+        fn field_number(&self) -> FieldNumber { self.num }
+
+        fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>> {
+            let tag = input.last_tag().unwrap();
+            if Tag::new(self.num, WireType::LengthDelimited) == tag || Tag::new(self.num, V::WIRE_TYPE) == tag {
+                input.add_entries_to::<_, Packed<V>>(&mut self.value).map(TryReadValue::Consumed)
+            } else {
+                Ok(TryReadValue::Yielded)
+            }
+        }
+        fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
+            builder.add_values::<_, Packed<V>>(&self.value, self.num)
+        }
+        fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result {
+            RepeatedValue::<Packed<V>>::write_to(&self.value, output, self.num)
+        }
+        fn is_initialized(&self) -> bool {
+            RepeatedValue::<Packed<V>>::is_initialized(&self.value)
         }
     }
 
@@ -213,14 +253,6 @@ mod internal {
 }
 
 use internal::{ExtensionIdentifier, ExtensionType, AnyExtension, TryReadValue};
-
-fn alt_tag<V: Value>(tag: Tag) -> Tag {
-    if tag.wire_type() == WireType::LengthDelimited {
-        Tag::new(tag.number(), V::WIRE_TYPE)
-    } else {
-        Tag::new(tag.number(), WireType::LengthDelimited)
-    }
-}
 
 /// A message type that can be extended by third-party extension fields.
 /// 
@@ -240,7 +272,7 @@ pub struct Extension<T, V, D = <V as Wrapper>::Inner>
         V::Inner: Borrow<D>,
         D: ?Sized + ToOwned<Owned = V::Inner> + 'static {
     t: PhantomData<fn(T) -> V>,
-    tag: Tag,
+    num: FieldNumber,
     default: Option<Cow<'static, D>>
 }
 
@@ -251,15 +283,15 @@ impl<T, V, D> ExtensionIdentifier for Extension<T, V, D>
         V::Inner: Mergable + Borrow<D> + PartialEq + Clone + Debug + Send + Sync,
         D: ?Sized + ToOwned<Owned = V::Inner> + Sync + 'static
 {
-    fn tag(&self) -> Tag {
-        self.tag
+    fn field_number(&self) -> FieldNumber {
+        self.num
     }
     fn message_type(&self) -> TypeId {
         TypeId::of::<T>()
     }
 
     fn try_read_value(&self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<Box<dyn AnyExtension>>> {
-        if Some(self.tag) == input.last_tag() {
+        if Some(Tag::new(self.num, V::WIRE_TYPE)) == input.last_tag() {
             input.read_value::<V>().map::<TryReadValue<Box<dyn AnyExtension>>, _>(|v| TryReadValue::Consumed(Box::new(self.new_entry(v))))
         } else {
             Ok(TryReadValue::Yielded)
@@ -280,7 +312,7 @@ impl<T, V, D> ExtensionType for Extension<T, V, D>
 
     fn new_entry(&self, value: Self::Value) -> Self::Entry {
         internal::ExtensionValue {
-            tag: self.tag,
+            num: self.num,
             value
         }
     }
@@ -295,17 +327,17 @@ impl<T, V, D> Extension<T, V, D>
         V: Wrapper,
         V::Inner: Borrow<D>,
         D: ?Sized + ToOwned<Owned = V::Inner> + 'static {
-    pub const fn with_static_default(tag: Tag, default: &'static D) -> Self {
+    pub const fn with_static_default(num: FieldNumber, default: &'static D) -> Self {
         Self {
             t: PhantomData,
-            tag,
+            num,
             default: Some(Cow::Borrowed(default))
         }
     }
-    pub const fn with_no_default(tag: Tag) -> Self {
+    pub const fn with_no_default(num: FieldNumber) -> Self {
         Self {
             t: PhantomData,
-            tag,
+            num,
             default: None
         }
     }
@@ -317,10 +349,10 @@ impl<T, V, D> Extension<T, V, D>
         V: Wrapper,
         V::Inner: Borrow<D>,
         D: Sized + ToOwned<Owned = V::Inner> + 'static {
-    pub const fn with_owned_default(tag: Tag, default: V::Inner) -> Self {
+    pub const fn with_owned_default(num: FieldNumber, default: V::Inner) -> Self {
         Self {
             t: PhantomData,
-            tag,
+            num,
             default: Some(Cow::Owned(default))
         }
     }
@@ -329,7 +361,7 @@ impl<T, V, D> Extension<T, V, D>
 /// An extension identifier for accessing a repeated extension value from an `ExtensionSet`
 pub struct RepeatedExtension<T, V: Wrapper> {
     t: PhantomData<fn(T) -> RepeatedField<V::Inner>>,
-    tag: Tag
+    num: FieldNumber
 }
 
 impl<T, V> ExtensionIdentifier for RepeatedExtension<T, V>
@@ -338,8 +370,8 @@ impl<T, V> ExtensionIdentifier for RepeatedExtension<T, V>
         V: Value + Wrapper + 'static,
         V::Inner: Clone + PartialEq + Debug + Send + Sync
 {
-    fn tag(&self) -> Tag {
-        self.tag
+    fn field_number(&self) -> FieldNumber {
+        self.num
     }
     fn message_type(&self) -> TypeId {
         TypeId::of::<T>()
@@ -347,9 +379,35 @@ impl<T, V> ExtensionIdentifier for RepeatedExtension<T, V>
 
     fn try_read_value(&self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<Box<dyn AnyExtension>>> {
         let tag = input.last_tag().unwrap();
-        if self.tag == tag || (V::WIRE_TYPE.is_packable() && alt_tag::<V>(self.tag) == tag) {
+        if Tag::new(self.num, V::WIRE_TYPE) == tag || (V::WIRE_TYPE.is_packable() && Tag::new(self.num, WireType::LengthDelimited) == tag) {
             let mut v = RepeatedField::new();
-            input.add_entries_to::<V, _>(&mut v)?;
+            input.add_entries_to::<_, V>(&mut v)?;
+
+            Ok(TryReadValue::Consumed(Box::new(self.new_entry(v))))
+        } else {
+            Ok(TryReadValue::Yielded)
+        }
+    }
+}
+
+impl<T, V> ExtensionIdentifier for RepeatedExtension<T, Packed<V>>
+    where
+        T: ExtendableMessage + 'static,
+        V: Value + Packable + Wrapper + 'static,
+        V::Inner: Clone + PartialEq + Debug + Send + Sync
+{
+    fn field_number(&self) -> FieldNumber {
+        self.num
+    }
+    fn message_type(&self) -> TypeId {
+        TypeId::of::<T>()
+    }
+
+    fn try_read_value(&self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<Box<dyn AnyExtension>>> {
+        let tag = input.last_tag().unwrap();
+        if Tag::new(self.num, WireType::LengthDelimited) == tag || Tag::new(self.num, V::WIRE_TYPE) == tag {
+            let mut v = RepeatedField::new();
+            input.add_entries_to::<_, V>(&mut v)?;
 
             Ok(TryReadValue::Consumed(Box::new(self.new_entry(v))))
         } else {
@@ -370,7 +428,7 @@ impl<T, V> ExtensionType for RepeatedExtension<T, V>
 
     fn new_entry(&self, value: Self::Value) -> Self::Entry {
         internal::RepeatedExtensionValue {
-            tag: self.tag,
+            num: self.num,
             value
         }
     }
@@ -378,6 +436,29 @@ impl<T, V> ExtensionType for RepeatedExtension<T, V>
         entry.value
     }
 }
+
+
+impl<T, V> ExtensionType for RepeatedExtension<T, Packed<V>>
+    where
+        T: ExtendableMessage + 'static,
+        V: Value + Packable + Wrapper + 'static,
+        V::Inner: Clone + PartialEq + Debug + Send + Sync
+{
+    type Entry = internal::RepeatedExtensionValue<Packed<V>>;
+    type Extended = T;
+    type Value = RepeatedField<V::Inner>;
+
+    fn new_entry(&self, value: Self::Value) -> Self::Entry {
+        internal::RepeatedExtensionValue {
+            num: self.num,
+            value
+        }
+    }
+    fn entry_value(entry: Self::Entry) -> Self::Value {
+        entry.value
+    }
+}
+
 
 /// A registry used to contain all the extensions from a generated code module
 pub struct ExtensionRegistry {
@@ -388,7 +469,7 @@ impl ExtensionRegistry {
     /// Returns whether an extension registry
     pub fn contains<T: ?Sized + ExtensionIdentifier>(&self, id: &T) -> bool {
         self.by_num
-            .get(&id.tag().number())
+            .get(&id.field_number())
             .map(|b| *b as *const dyn ExtensionIdentifier as *const u8 == id as *const T as *const u8)
             .unwrap_or(false)
     }
@@ -426,7 +507,7 @@ impl RegistryBuilder {
     /// Adds an extension identifier to this registry
     #[inline]
     pub fn add_identifier(mut self, id: &'static dyn ExtensionIdentifier) -> Result<Self, ExtensionConflict> {
-        let num = id.tag().number();
+        let num = id.field_number();
         match self.by_num.insert(num, id) {
             Some(_) => Err(ExtensionConflict(num)),
             None => Ok(self)
@@ -486,13 +567,13 @@ impl<T: ExtendableMessage + 'static> ExtensionSet<T> {
     }
     /// Returns whether a field in this set has the field number of the specified extension
     pub fn has_extension_unchecked<U: ?Sized + ExtensionIdentifier>(&self, extension: &U) -> bool {
-        self.by_num.contains_key(&extension.tag().number())
+        self.by_num.contains_key(&extension.field_number())
     }
 
     /// Gets the value of the specified extension if it's set. If the extension is not set, this returns None.
     pub fn value<U: ExtensionType<Extended = T>>(&self, extension: &U) -> Option<&U::Value> {
         if self.registry_contains(extension) {
-            self.by_num.get(&extension.tag().number()).map(|v| unsafe {
+            self.by_num.get(&extension.field_number()).map(|v| unsafe {
                 (*(v.as_ref() as *const dyn AnyExtension as *const U::Entry)).as_ref()
             })
         } else {
@@ -513,7 +594,7 @@ impl<T: ExtendableMessage + 'static> ExtensionSet<T> {
     /// Returns a Field which can be used to modify an extension value
     pub fn field<'a, 'e, U: 'e + ExtensionType<Extended = T>>(&'a mut self, extension: &'e U) -> Option<Field<'a, 'e, U>> {
         if self.registry_contains(extension) {
-            match self.by_num.entry(extension.tag().number()) {
+            match self.by_num.entry(extension.field_number()) {
                 hash_map::Entry::Occupied(entry) => Some(Field::Occupied(OccupiedField { extension, entry })),
                 hash_map::Entry::Vacant(entry) => Some(Field::Vacant(VacantField { extension, entry })),
             }
@@ -568,24 +649,12 @@ impl<T: ExtendableMessage + 'static> FieldSet for ExtensionSet<T> {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         self.by_num
             .values()
-            .try_fold(builder, |mut builder, field| {
-                let tag = field.tag();
-                builder = builder.add_tag(tag)?;
-                builder = field.calculate_size(builder)?;
-                builder = 
-                    if tag.wire_type() == WireType::StartGroup {
-                        builder.add_tag(tag)?
-                    } else {
-                        builder
-                    };
-                Some(builder)
-            })
+            .try_fold(builder, |builder, field| field.calculate_size(builder))
     }
     fn write_to<U: Output>(&self, output: &mut CodedWriter<U>) -> write::Result {
         if !self.by_num.is_empty() {
             let mut output = output.as_any();
             for field in self.by_num.values() {
-                output.write_tag(field.tag())?;
                 field.write_to(&mut output)?;
             }
         }

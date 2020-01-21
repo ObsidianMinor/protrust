@@ -2,7 +2,7 @@
 
 use crate::{Mergable, internal::Sealed};
 use crate::io::{self, read, write, WireType, FieldNumber, Tag, LengthBuilder, Length, CodedReader, CodedWriter, Input, Output};
-use crate::raw::{self, Value};
+use crate::raw::{self, Value, Packable, Packed};
 use core::convert::TryInto;
 use core::hash::Hash;
 use trapper::Wrapper;
@@ -11,14 +11,12 @@ pub mod unknown_fields;
 
 /// A type of value that writes and reads repeated values on the wire, a common trait unifying repeated and map fields.
 pub trait RepeatedValue<T>: Sealed {
-    /// Adds entries to the repeated field from the coded reader. This doesn't take a corresponding tag as 
-    /// inputs should be able to handle packed or unpacked values if their type supports it, even if the 
-    /// field doesn't match with the encoded value's packedness.
+    /// Adds entries to the repeated field from the coded reader.
     fn add_entries_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()>;
-    /// Calculates the size of the repeated value. This takes a corresponding tag to indicate the packedness of the field if required.
-    fn calculate_size(&self, builder: LengthBuilder, tag: Tag) -> Option<LengthBuilder>;
-    /// Writes the value to the coded writer. This takes a corresponding tag to indicate the packedness of the field if required.
-    fn write_to<U: Output>(&self, output: &mut CodedWriter<U>, tag: Tag) -> write::Result;
+    /// Calculates the size of the repeated value.
+    fn calculate_size(&self, builder: LengthBuilder, num: FieldNumber) -> Option<LengthBuilder>;
+    /// Writes the value to the coded writer. This takes a field number to build the tag required for each field.
+    fn write_to<U: Output>(&self, output: &mut CodedWriter<U>, num: FieldNumber) -> write::Result;
     /// Returns a bool indicating whether all the values in the field are initialized
     fn is_initialized(&self) -> bool;
 }
@@ -70,55 +68,76 @@ impl<T> Sealed for RepeatedField<T> { }
 impl<V: Value + Wrapper> RepeatedValue<V> for RepeatedField<V::Inner> {
     #[inline]
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
-        if let Some(last_tag) = input.last_tag() {
-            if WireType::is_packable(V::WIRE_TYPE) && last_tag.wire_type() == WireType::LengthDelimited {
-                input.read_limit()?.for_all(|input| input.read_value::<V>().map(|v| self.push(v)))
-            } else {
-                input.read_value::<V>().map(|v| self.push(v))
-            }
-        } else {
-            Ok(())
-        }
+        input.read_value::<V>().map(|v| self.push(v))
     }
     #[inline]
-    fn calculate_size(&self, builder: LengthBuilder, tag: Tag) -> Option<LengthBuilder> {
+    fn calculate_size(&self, builder: LengthBuilder, num: FieldNumber) -> Option<LengthBuilder> {
         if self.is_empty() {
             return Some(builder);
         }
 
         let len: i32 = self.len().try_into().ok()?;
 
+        let tag = Tag::new(num, V::WIRE_TYPE);
         let tag_len = io::raw_varint32_size(tag.get());
         let builder =
-            if WireType::is_packable(V::WIRE_TYPE) && tag.wire_type() == WireType::LengthDelimited {
-                builder.add_bytes(tag_len)
-            } else {
-                builder.add_bytes(Length::new({
-                    #[cfg(feature = "checked_size")]
-                    { tag_len.get().checked_mul(len)? }
-                    #[cfg(not(feature = "checked_size"))]
-                    { tag_len.get() * len }
-                })?)
-            }?;
+            builder.add_bytes(Length::new({
+                #[cfg(feature = "checked_size")]
+                { tag_len.get().checked_mul(len)? }
+                #[cfg(not(feature = "checked_size"))]
+                { tag_len.get() * len }
+            })?)?;
         <Self as ValuesSize<V>>::calculate_size(self, builder)
     }
     #[inline]
-    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>, tag: Tag) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>, num: FieldNumber) -> write::Result {
         if self.is_empty() {
             return Ok(());
         }
 
-        if WireType::is_packable(V::WIRE_TYPE) && tag.wire_type() == WireType::LengthDelimited {
-            let len = <Self as ValuesSize<V>>::calculate_size(self, LengthBuilder::new()).ok_or(write::Error::ValueTooLarge)?.build();
-            output.write_length(len)?;
-            for value in self {
-                output.write_value::<V>(value)?;
-            }
-        } else {
-            for value in self {
-                output.write_tag(tag)?;
-                output.write_value::<V>(value)?;
-            }
+        for value in self {
+            output.write_field::<V>(num, value)?;
+        }
+
+        Ok(())
+    }
+    fn is_initialized(&self) -> bool {
+        self.iter().map(V::wrap_ref).all(V::is_initialized)
+    }
+}
+impl<V: Value + Packable + Wrapper> RepeatedValue<Packed<V>> for RepeatedField<V::Inner> {
+    #[inline]
+    fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
+        input.read_limit()?.for_all(|input| input.read_value::<V>().map(|v| self.push(v)))
+    }
+    #[inline]
+    fn calculate_size(&self, builder: LengthBuilder, num: FieldNumber) -> Option<LengthBuilder> {
+        if self.is_empty() {
+            return Some(builder);
+        }
+
+        let len = <Self as ValuesSize<V>>::calculate_size(self, LengthBuilder::new())?.build();
+
+        builder
+            .add_tag(Tag::new(num, WireType::LengthDelimited))?
+            .add_value::<raw::Uint32>(&(len.get() as u32))?
+            .add_bytes(len)
+    }
+    #[inline]
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>, num: FieldNumber) -> write::Result {
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        let len = 
+            <Self as ValuesSize<V>>::calculate_size(self, LengthBuilder::new())
+                .ok_or(write::Error::ValueTooLarge)?
+                .build();
+
+        output.write_tag(Tag::new(num, WireType::LengthDelimited))?;
+        output.write_length(len)?;
+        for value in self {
+            output.write_value::<V>(value)?;
         }
         Ok(())
     }
@@ -167,12 +186,13 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
 
         Ok(())
     }
-    fn calculate_size(&self, builder: LengthBuilder, tag: Tag) -> Option<LengthBuilder> {
+    fn calculate_size(&self, builder: LengthBuilder, num: FieldNumber) -> Option<LengthBuilder> {
         if self.is_empty() {
             return Some(builder);
         }
 
         let len: i32 = self.len().try_into().ok()?;
+        let tag = Tag::new(num, WireType::LengthDelimited);
         let tag_len = io::raw_varint32_size(tag.get()).get();
         let start_len = { // every size calculation starts with the size of all tags
             #[cfg(feature = "checked_size")]
@@ -192,11 +212,12 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
         }
         Some(builder)
     }
-    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>, tag: Tag) -> write::Result {
+    fn write_to<T: Output>(&self, output: &mut CodedWriter<T>, num: FieldNumber) -> write::Result {
         if self.is_empty() {
             return Ok(());
         }
 
+        let tag = Tag::new(num, WireType::LengthDelimited);
         for (key, value) in self {
             output.write_tag(tag)?;
             let length = 
