@@ -153,12 +153,19 @@ impl UnknownFieldSet {
 }
 impl UnknownFieldSet {
     /// Creates a new unknown field set in the specified allocator
+    #[inline]
     pub fn new() -> Self {
         Default::default()
     }
     /// Gets the number of fields present in this set
+    #[inline]
     pub fn field_len(&self) -> usize {
         self.inner.len()
+    }
+    /// Returns whether any fields are present in this set
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.inner.len() == 0
     }
     /// Returns a slice of values for a field
     pub fn values(&self, num: FieldNumber) -> &[UnknownField] {
