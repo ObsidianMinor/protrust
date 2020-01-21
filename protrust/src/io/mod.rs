@@ -362,6 +362,20 @@ impl LengthBuilder {
     pub fn add_value<V: Value + Wrapper>(self, value: &V::Inner) -> Option<Self> {
         V::wrap_ref(value).calculate_size(self)
     }
+    /// Adds a field's length to this instance using the specified field number
+    #[inline]
+    #[must_use = "this returns the builder to chain and does not mutate it in place"]
+    pub fn add_field<V: Value + Wrapper>(self, num: FieldNumber, value: &V::Inner) -> Option<Self> {
+        let temp = 
+            self.add_tag(Tag::new(num, V::WIRE_TYPE))?
+                .add_value::<V>(value)?;
+
+        if V::WIRE_TYPE == WireType::StartGroup {
+            temp.add_tag(Tag::new(num, WireType::EndGroup))
+        } else {
+            Some(temp)
+        }
+    }
 
     /// Adds a value collection's length to this instance with the specified tag
     #[inline]
