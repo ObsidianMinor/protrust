@@ -33,6 +33,24 @@ pub trait ConstSized: Value {
     /// The constant size of the value
     const SIZE: Length;
 }
+/// A trait indicating whether a value type can be packed or not. Used in conjunction with the [`Packed`](struct.Packed.html) struct.
+pub trait Packable: Value { }
+
+newtype! {
+    /// A packed value type used with packed repeated fields.
+    pub type Packed<V: Packable + Wrapper>(V::Inner);
+}
+
+macro_rules! packable {
+    ($($t:ty),*) => {
+        $(
+            impl Packable for $t { }
+        )*
+    };
+}
+
+packable!(Int32, Uint32, Int64, Uint64, Sint32, Sint64, Fixed32, Fixed64, Sfixed32, Sfixed64, Bool);
+impl<T: crate::Enum> Packable for Enum<T> { }
 
 const MAX_VARINT64_SIZE: Length = unsafe { Length::new_unchecked(10) };
 
