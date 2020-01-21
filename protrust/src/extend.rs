@@ -178,7 +178,9 @@ mod internal {
 
         fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>> {
             let tag = input.last_tag().unwrap();
-            if Tag::new(self.num, V::WIRE_TYPE) == tag || (V::WIRE_TYPE.is_packable() && Tag::new(self.num, WireType::LengthDelimited) == tag) {
+            let num = tag.number();
+            let wt = tag.wire_type();
+            if self.num == num && (wt == V::WIRE_TYPE || (V::WIRE_TYPE.is_packable() && wt == WireType::LengthDelimited)) {
                 input.add_entries_to::<_, V>(&mut self.value).map(TryReadValue::Consumed)
             } else {
                 Ok(TryReadValue::Yielded)
@@ -188,7 +190,7 @@ mod internal {
             builder.add_values::<_, V>(&self.value, self.num)
         }
         fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result {
-            RepeatedValue::<V>::write_to(&self.value, output, self.num)
+            output.write_values::<_, V>(&self.value, self.num)
         }
         fn is_initialized(&self) -> bool {
             RepeatedValue::<V>::is_initialized(&self.value)
@@ -226,7 +228,9 @@ mod internal {
 
         fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>> {
             let tag = input.last_tag().unwrap();
-            if Tag::new(self.num, WireType::LengthDelimited) == tag || Tag::new(self.num, V::WIRE_TYPE) == tag {
+            let num = tag.number();
+            let wt = tag.wire_type();
+            if self.num == num && (wt == WireType::LengthDelimited || wt == V::WIRE_TYPE) {
                 input.add_entries_to::<_, Packed<V>>(&mut self.value).map(TryReadValue::Consumed)
             } else {
                 Ok(TryReadValue::Yielded)
@@ -236,7 +240,7 @@ mod internal {
             builder.add_values::<_, Packed<V>>(&self.value, self.num)
         }
         fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result {
-            RepeatedValue::<Packed<V>>::write_to(&self.value, output, self.num)
+            output.write_values::<_, Packed<V>>(&self.value, self.num)
         }
         fn is_initialized(&self) -> bool {
             RepeatedValue::<Packed<V>>::is_initialized(&self.value)

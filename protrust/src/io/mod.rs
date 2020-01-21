@@ -189,7 +189,11 @@ impl Tag {
     /// ```
     #[inline]
     pub fn wire_type(self) -> WireType {
-        WireType::try_from((self.get() & 0b111) as u8).expect("invalid wire type")
+        match WireType::try_from((self.get() & 0b0111) as u8) {
+            Ok(wt) => wt,
+            // we can only reach this through unsafe code
+            Err(_) => unsafe { core::hint::unreachable_unchecked() }
+        }
     }
 
     /// Gets the field number from this tag
