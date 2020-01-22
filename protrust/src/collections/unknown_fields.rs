@@ -17,7 +17,7 @@ use hashbrown::{HashMap, hash_map};
 use super::{FieldSet, TryRead};
 
 /// An unknown field in an [`UnknownFieldSet`](struct.UnknownFieldSet.html).
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum UnknownField {
     /// A varint field value
     Varint(u64),
@@ -32,7 +32,7 @@ pub enum UnknownField {
 }
 
 /// A set of unknown fields encountered while parsing
-#[derive(Default, Clone, Debug)]
+#[derive(PartialEq, Default, Clone, Debug)]
 pub struct UnknownFieldSet {
     inner: HashMap<FieldNumber, Vec<UnknownField>>,
 }

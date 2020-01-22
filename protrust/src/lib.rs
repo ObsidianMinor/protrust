@@ -62,8 +62,29 @@ pub trait Message: Sized {
 /// allowing code to refer to them easily.
 pub trait Enum: From<i32> + Into<i32> + Clone + Copy + Debug + Hash { }
 
-/// A type that can be merged with one of `T`.
-/// Merge behavior is specific to each type.
+/// A type that can be merged with one of `T`. Merge behavior is specific to each type.
+/// 
+/// Messages will merge fields present in `other` into self, while repeated fields will concat
+/// and extend the field in `self` with entries from `other`.
+/// 
+/// # Example
+/// 
+/// ```
+/// # mod timestamp { include!("../include/timestamp.rs"); }
+/// # use timestamp::Timestamp;
+/// # use protrust::{Mergable, Message};
+/// 
+/// let mut time = Timestamp::new();
+/// *time.seconds_mut() = 5;
+/// 
+/// let mut other = Timestamp::new();
+/// *time.nanos_mut() = 100;
+/// 
+/// time.merge(&other);
+/// 
+/// assert_eq!(time.seconds(), &5);
+/// assert_eq!(time.nanos(), &100);
+/// ```
 pub trait Mergable<T = Self>: Sized {
     /// Merges another value into this one
     fn merge(&mut self, other: &T);
@@ -71,7 +92,26 @@ pub trait Mergable<T = Self>: Sized {
 
 /// Merges two values together.
 /// 
-/// Internally uses an alias to `Mergable::merge`
+/// Internally uses an alias to `Mergable::merge`.
+/// 
+/// # Example
+/// 
+/// ```
+/// # mod timestamp { include!("../include/timestamp.rs"); }
+/// # use timestamp::Timestamp;
+/// # use protrust::{Message, merge};
+/// 
+/// let mut time = Timestamp::new();
+/// *time.seconds_mut() = 5;
+/// 
+/// let mut other = Timestamp::new();
+/// *time.nanos_mut() = 100;
+/// 
+/// merge(&mut time, &other);
+/// 
+/// assert_eq!(time.seconds(), &5);
+/// assert_eq!(time.nanos(), &100);
+/// ```
 pub fn merge<T: Mergable<V>, V>(value: &mut T, other: &V) {
     value.merge(other)
 }
