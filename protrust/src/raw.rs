@@ -433,7 +433,10 @@ impl<T: TraitMessage> Value for Message<T> {
     const WIRE_TYPE: WireType = WireType::LengthDelimited;
 
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-        self.0.calculate_size(builder)
+        let len = Length::of_message(&self.0)?;
+        builder
+            .add_value::<Uint32>(&(len.get() as u32))?
+            .add_bytes(len)
     }
     fn merge_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()> {
         input.read_limit()?.then(|input| self.0.merge_from(input))

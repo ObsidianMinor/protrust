@@ -15,6 +15,7 @@ use core::fmt::{self, Display, Formatter};
 use core::mem;
 use core::num::NonZeroU32;
 use core::slice;
+use crate::Message;
 use crate::collections::{RepeatedValue, FieldSet};
 use crate::raw::Value;
 use trapper::Wrapper;
@@ -311,6 +312,11 @@ impl Length {
     /// Returns the length of the value in the specified form
     pub fn of_value<V: Value + Wrapper>(value: &V::Inner) -> Option<Length> {
         LengthBuilder::new().add_value::<V>(value).map(LengthBuilder::build)
+    }
+
+    /// Returns the length of the message without a length delimiter
+    pub fn of_message<T: Message>(value: &T) -> Option<Length> {
+        value.calculate_size(LengthBuilder::new()).map(LengthBuilder::build)
     }
 
     /// Returns the length of the set of values with the specified tag
