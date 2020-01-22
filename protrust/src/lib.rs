@@ -63,16 +63,10 @@ pub trait Message: Sized {
 pub trait Enum: From<i32> + Into<i32> + Clone + Copy + Debug + Hash { }
 
 /// A type that can be merged with one of `T`.
-/// Merge behavior is specific to each type, the default behavior for clonable types clones from the other value.
+/// Merge behavior is specific to each type.
 pub trait Mergable<T = Self>: Sized {
     /// Merges another value into this one
     fn merge(&mut self, other: &T);
-}
-
-default impl<T: Clone> Mergable for T {
-    fn merge(&mut self, other: &T) {
-        self.clone_from(other)
-    }
 }
 
 /// Merges two values together.
