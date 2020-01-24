@@ -1,6 +1,6 @@
-use protrust::{UnknownFieldSet, Mergable, Message, raw};
-use protrust::io::{read, write, CodedReader, Input, CodedWriter, Output, FieldNumber, Tag, LengthBuilder};
-use protrust::raw as r;
+use crate::{UnknownFieldSet, Mergable, Message};
+use crate::io::{read, write, CodedReader, Input, CodedWriter, Output, FieldNumber, Tag, LengthBuilder};
+use crate::raw as r;
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Timestamp {
