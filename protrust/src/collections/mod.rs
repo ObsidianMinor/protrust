@@ -2,10 +2,9 @@
 
 use crate::{Mergable, internal::Sealed};
 use crate::io::{self, read, write, WireType, FieldNumber, Tag, LengthBuilder, Length, CodedReader, CodedWriter, Input, Output};
-use crate::raw::{self, Value, Packable, Packed};
+use crate::raw::{self, Value, ValueType, Packable, Packed};
 use core::convert::TryInto;
 use core::hash::Hash;
-use trapper::Wrapper;
 
 pub mod unknown_fields;
 
@@ -65,7 +64,11 @@ impl<'a, T: Input> TryRead<'a, T> {
 pub type RepeatedField<T> = alloc::vec::Vec<T>;
 
 impl<T> Sealed for RepeatedField<T> { }
-impl<V: Value + Wrapper> RepeatedValue<V> for RepeatedField<V::Inner> {
+impl<V> RepeatedValue<V> for RepeatedField<V::Inner>
+    where
+        V: ValueType,
+        V::Inner: Value<V>,
+{
     #[inline]
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         input.read_value::<V>().map(|v| self.push(v))
@@ -102,10 +105,14 @@ impl<V: Value + Wrapper> RepeatedValue<V> for RepeatedField<V::Inner> {
         Ok(())
     }
     fn is_initialized(&self) -> bool {
-        self.iter().map(V::wrap_ref).all(V::is_initialized)
+        self.iter().all(Value::is_initialized)
     }
 }
-impl<V: Value + Packable + Wrapper> RepeatedValue<Packed<V>> for RepeatedField<V::Inner> {
+impl<V> RepeatedValue<Packed<V>> for RepeatedField<V::Inner>
+    where
+        V: ValueType + Packable,
+        V::Inner: Value<V>,
+{
     #[inline]
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         input.read_limit()?.for_all(|input| input.read_value::<V>().map(|v| self.push(v)))
@@ -142,7 +149,7 @@ impl<V: Value + Packable + Wrapper> RepeatedValue<Packed<V>> for RepeatedField<V
         Ok(())
     }
     fn is_initialized(&self) -> bool {
-        self.iter().map(V::wrap_ref).all(V::is_initialized)
+        self.iter().all(Value::is_initialized)
     }
 }
 impl<V: Clone> Mergable for RepeatedField<V> {
@@ -161,10 +168,10 @@ const VALUE_FIELD: FieldNumber = unsafe { FieldNumber::new_unchecked(2) };
 impl<K, V> Sealed for MapField<K, V> { }
 impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
     where 
-        K: Value + Wrapper,
-        K::Inner: Default + Eq + Hash,
-        V: Value + Wrapper,
-        V::Inner: Default
+        K: ValueType,
+        K::Inner: Value<K> + Default + Eq + Hash,
+        V: ValueType,
+        V::Inner: Value<V> + Default
 {
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         let key_tag = Tag::new(KEY_FIELD, K::WIRE_TYPE);
@@ -236,7 +243,7 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
         Ok(())
     }
     fn is_initialized(&self) -> bool {
-        self.values().map(V::wrap_ref).all(V::is_initialized)
+        self.values().all(Value::is_initialized)
     }
 }
 
@@ -260,7 +267,9 @@ trait ValuesSize<T> {
 }
 
 impl<V> ValuesSize<V> for RepeatedField<V::Inner>
-    where V: Value + Wrapper
+    where
+        V: ValueType,
+        V::Inner: Value<V>,
 {
     default fn calculate_size(&self, mut builder: LengthBuilder) -> Option<LengthBuilder> {
         for value in self {
@@ -271,7 +280,9 @@ impl<V> ValuesSize<V> for RepeatedField<V::Inner>
 }
 
 impl<V> ValuesSize<V> for RepeatedField<V::Inner>
-    where V: raw::ConstSized + Wrapper
+    where
+        V: ValueType + raw::ConstSized,
+        V::Inner: Value<V>,
 {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
         let size = V::SIZE;

@@ -16,8 +16,7 @@ use core::mem;
 use core::num::NonZeroU32;
 use core::slice;
 use crate::collections::{RepeatedValue, FieldSet};
-use crate::raw::Value;
-use trapper::Wrapper;
+use crate::raw::{Value, ValueType};
 
 #[cfg(feature = "std")]
 use std::error::Error;
@@ -309,7 +308,11 @@ impl Length {
     }
 
     /// Returns the length of the value in the specified form
-    pub fn of_value<V: Value + Wrapper>(value: &V::Inner) -> Option<Length> {
+    pub fn of_value<V>(value: &V::Inner) -> Option<Length>
+        where
+            V: ValueType,
+            V::Inner: Value<V>,
+    {
         LengthBuilder::new().add_value::<V>(value).map(LengthBuilder::build)
     }
 
@@ -363,13 +366,21 @@ impl LengthBuilder {
     /// Adds a value's length to this instance
     #[inline]
     #[must_use = "this returns the builder to chain and does not mutate it in place"]
-    pub fn add_value<V: Value + Wrapper>(self, value: &V::Inner) -> Option<Self> {
-        V::wrap_ref(value).calculate_size(self)
+    pub fn add_value<V>(self, value: &V::Inner) -> Option<Self>
+        where
+            V: ValueType,
+            V::Inner: Value<V>,
+    {
+        value.calculate_size(self)
     }
     /// Adds a field's length to this instance using the specified field number
     #[inline]
     #[must_use = "this returns the builder to chain and does not mutate it in place"]
-    pub fn add_field<V: Value + Wrapper>(self, num: FieldNumber, value: &V::Inner) -> Option<Self> {
+    pub fn add_field<V>(self, num: FieldNumber, value: &V::Inner) -> Option<Self>
+        where
+            V: ValueType,
+            V::Inner: Value<V>,
+    {
         let temp = 
             self.add_tag(Tag::new(num, V::WIRE_TYPE))?
                 .add_value::<V>(value)?;
