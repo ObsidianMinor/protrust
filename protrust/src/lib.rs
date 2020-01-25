@@ -1,7 +1,6 @@
 //! A fast, feature complete, protobuf implementation.
 
 #![feature(const_fn)]
-#![feature(read_initializer)]
 #![feature(specialization)]
 #![feature(box_into_raw_non_null)]
 #![feature(new_uninit)]

@@ -11,7 +11,6 @@ use crate::collections::{RepeatedValue, FieldSet};
 use crate::io::{FieldNumber, WireType, Tag, Length, stream::{self, Write}};
 use crate::raw::Value;
 use super::{raw_varint32_size, raw_varint64_size};
-use trapper::Wrapper;
 
 #[cfg(feature = "std")]
 use std::error;
@@ -691,12 +690,12 @@ impl<T: Output> CodedWriter<T> {
 
     /// Writes the value to the output. This uses an alias to `Value::write_to`.
     #[inline]
-    pub fn write_value<V: Value + Wrapper>(&mut self, value: &V::Inner) -> Result {
-        V::wrap_ref(value).write_to(self)
+    pub fn write_value<V: Value>(&mut self, value: &V::Inner) -> Result {
+        V::write_to(value, self)
     }
     /// Writes the value to the output using the field number and the wire type of the value.
     #[inline]
-    pub fn write_field<V: Value + Wrapper>(&mut self, num: FieldNumber, value: &V::Inner) -> Result {
+    pub fn write_field<V: Value>(&mut self, num: FieldNumber, value: &V::Inner) -> Result {
         self.write_tag(Tag::new(num, V::WIRE_TYPE))?;
         self.write_value::<V>(value)?;
         if V::WIRE_TYPE != WireType::StartGroup {

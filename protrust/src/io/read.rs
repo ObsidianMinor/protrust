@@ -11,7 +11,6 @@ use crate::collections::{RepeatedValue, FieldSet, TryRead};
 use crate::extend::ExtensionRegistry;
 use crate::io::{Tag, WireType, ByteString, stream::{self, Read}};
 use crate::raw::{self, Value};
-use trapper::Wrapper;
 
 #[cfg(feature = "std")]
 use std::error;
@@ -1584,14 +1583,14 @@ impl<T: Input> CodedReader<T> {
     /// Reads a new instance of the value from the reader.
     /// This is the inverse of `Value::read_new`.
     #[inline]
-    pub fn read_value<V: Value + Wrapper>(&mut self) -> Result<V::Inner> {
-        V::read_new(self).map(V::unwrap)
+    pub fn read_value<V: Value>(&mut self) -> Result<V::Inner> {
+        V::read_new(self)
     }
     /// Merges the reader's value with the value from the reader.
     /// This is the inverse of `Value::merge_from`.
     #[inline]
-    pub fn merge_value<V: Value + Wrapper>(&mut self, value: &mut V::Inner) -> Result<()> {
-        V::wrap_mut(value).merge_from(self)
+    pub fn merge_value<V: Value>(&mut self, value: &mut V::Inner) -> Result<()> {
+        V::merge_from(value, self)
     }
     /// Adds field entries from the reader to the specified value.
     /// This is the inverse of `RepeatedValue::add_entries_from`.

@@ -10,9 +10,8 @@ use crate::Mergable;
 use crate::collections::{RepeatedField, FieldSet, TryRead};
 use crate::internal::Sealed;
 use crate::io::{read::{self, Input}, write::{self, Output}, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
-use crate::raw::{Value, Packable, Packed};
+use crate::raw::{ValueType, Value, Packable, Packed};
 use hashbrown::{HashMap, hash_map::{self, DefaultHashBuilder}};
-use trapper::Wrapper;
 
 mod internal {
     use alloc::boxed::Box;
@@ -21,9 +20,8 @@ mod internal {
     use crate::{Mergable, merge};
     use crate::collections::{RepeatedField, RepeatedValue};
     use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
-    use crate::raw::{Value, Packable, Packed};
+    use crate::raw::{ValueType, Value, Packable, Packed};
     use super::ExtendableMessage;
-    use trapper::Wrapper;
 
     pub trait ExtensionIdentifier: Sync {
         fn field_number(&self) -> FieldNumber;
@@ -58,18 +56,18 @@ mod internal {
         fn is_initialized(&self) -> bool;
     }
 
-    pub struct ExtensionValue<V: Wrapper> {
+    pub struct ExtensionValue<V: ValueType> {
         pub value: V::Inner,
         pub num: FieldNumber,
     }
 
-    impl<V: Wrapper> AsRef<V::Inner> for ExtensionValue<V> {
+    impl<V: ValueType> AsRef<V::Inner> for ExtensionValue<V> {
         fn as_ref(&self) -> &V::Inner {
             &self.value
         }
     }
 
-    impl<V: Wrapper> AsMut<V::Inner> for ExtensionValue<V> {
+    impl<V: ValueType> AsMut<V::Inner> for ExtensionValue<V> {
         fn as_mut(&mut self) -> &mut V::Inner {
             &mut self.value
         }
@@ -77,7 +75,7 @@ mod internal {
 
     impl<V> AnyExtension for ExtensionValue<V>
         where
-            V: Value + Wrapper + 'static,
+            V: Value + 'static,
             V::Inner: Clone + Mergable + PartialEq + Debug + Send + Sync
     {
         fn clone_into_box(&self) -> Box<dyn AnyExtension> {
@@ -116,13 +114,13 @@ mod internal {
             output.write_field::<V>(self.num, &self.value)
         }
         fn is_initialized(&self) -> bool {
-            V::wrap_ref(&self.value).is_initialized()
+            V::is_initialized(&self.value)
         }
     }
 
     impl<V> Debug for ExtensionValue<V>
         where
-            V: Wrapper + 'static,
+            V: ValueType + 'static,
             V::Inner: Debug
     {
         fn fmt(&self, f: &mut Formatter) -> fmt::Result {
@@ -130,18 +128,18 @@ mod internal {
         }
     }
 
-    pub struct RepeatedExtensionValue<V: Wrapper> {
+    pub struct RepeatedExtensionValue<V: ValueType> {
         pub value: RepeatedField<V::Inner>,
         pub num: FieldNumber,
     }
 
-    impl<V: Wrapper> AsRef<RepeatedField<V::Inner>> for RepeatedExtensionValue<V> {
+    impl<V: ValueType> AsRef<RepeatedField<V::Inner>> for RepeatedExtensionValue<V> {
         fn as_ref(&self) -> &RepeatedField<V::Inner> {
             &self.value
         }
     }
 
-    impl<V: Wrapper> AsMut<RepeatedField<V::Inner>> for RepeatedExtensionValue<V> {
+    impl<V: ValueType> AsMut<RepeatedField<V::Inner>> for RepeatedExtensionValue<V> {
         fn as_mut(&mut self) -> &mut RepeatedField<V::Inner> {
             &mut self.value
         }
@@ -149,7 +147,7 @@ mod internal {
 
     impl<V> AnyExtension for RepeatedExtensionValue<V>
         where
-            V: Value + Wrapper + 'static,
+            V: Value + 'static,
             V::Inner: Clone + PartialEq + Debug + Send + Sync
     {
         fn clone_into_box(&self) -> Box<dyn AnyExtension> {
@@ -199,7 +197,7 @@ mod internal {
 
     impl<V> AnyExtension for RepeatedExtensionValue<Packed<V>>
         where
-            V: Value + Packable + Wrapper + 'static,
+            V: Value + Packable + 'static,
             V::Inner: Clone + PartialEq + Debug + Send + Sync
     {
         fn clone_into_box(&self) -> Box<dyn AnyExtension> {
@@ -247,7 +245,7 @@ mod internal {
         }
     }
 
-    impl<V: Wrapper> Debug for RepeatedExtensionValue<V>
+    impl<V: ValueType> Debug for RepeatedExtensionValue<V>
         where V::Inner: Debug
     {
         fn fmt(&self, f: &mut Formatter) -> fmt::Result {
@@ -270,9 +268,9 @@ pub trait ExtendableMessage: Sized {
 }
 
 /// An extension identifier for accessing an extension value from an ExtensionSet
-pub struct Extension<T, V, D = <V as Wrapper>::Inner>
+pub struct Extension<T, V, D = <V as ValueType>::Inner>
     where
-        V: Wrapper,
+        V: ValueType,
         V::Inner: Borrow<D>,
         D: ?Sized + ToOwned<Owned = V::Inner> + 'static {
     t: PhantomData<fn(T) -> V>,
@@ -283,7 +281,7 @@ pub struct Extension<T, V, D = <V as Wrapper>::Inner>
 impl<T, V, D> ExtensionIdentifier for Extension<T, V, D>
     where
         T: ExtendableMessage + 'static,
-        V: Value + Wrapper + 'static,
+        V: Value + 'static,
         V::Inner: Mergable + Borrow<D> + PartialEq + Clone + Debug + Send + Sync,
         D: ?Sized + ToOwned<Owned = V::Inner> + Sync + 'static
 {
@@ -306,7 +304,7 @@ impl<T, V, D> ExtensionIdentifier for Extension<T, V, D>
 impl<T, V, D> ExtensionType for Extension<T, V, D>
     where
         T: ExtendableMessage + 'static,
-        V: Value + Wrapper + 'static,
+        V: Value + 'static,
         V::Inner: Mergable + Borrow<D> + PartialEq + Clone + Debug + Send + Sync,
         D: ?Sized + ToOwned<Owned = V::Inner> + Sync + 'static
 {
@@ -328,7 +326,7 @@ impl<T, V, D> ExtensionType for Extension<T, V, D>
 #[doc(hidden)]
 impl<T, V, D> Extension<T, V, D>
     where
-        V: Wrapper,
+        V: ValueType,
         V::Inner: Borrow<D>,
         D: ?Sized + ToOwned<Owned = V::Inner> + 'static {
     pub const fn with_static_default(num: FieldNumber, default: &'static D) -> Self {
@@ -350,7 +348,7 @@ impl<T, V, D> Extension<T, V, D>
 #[doc(hidden)]
 impl<T, V, D> Extension<T, V, D>
     where
-        V: Wrapper,
+        V: ValueType,
         V::Inner: Borrow<D>,
         D: Sized + ToOwned<Owned = V::Inner> + 'static {
     pub const fn with_owned_default(num: FieldNumber, default: V::Inner) -> Self {
@@ -363,7 +361,7 @@ impl<T, V, D> Extension<T, V, D>
 }
 
 /// An extension identifier for accessing a repeated extension value from an `ExtensionSet`
-pub struct RepeatedExtension<T, V: Wrapper> {
+pub struct RepeatedExtension<T, V: ValueType> {
     t: PhantomData<fn(T) -> RepeatedField<V::Inner>>,
     num: FieldNumber
 }
@@ -371,7 +369,7 @@ pub struct RepeatedExtension<T, V: Wrapper> {
 impl<T, V> ExtensionIdentifier for RepeatedExtension<T, V>
     where
         T: ExtendableMessage + 'static,
-        V: Value + Wrapper + 'static,
+        V: Value + 'static,
         V::Inner: Clone + PartialEq + Debug + Send + Sync
 {
     fn field_number(&self) -> FieldNumber {
@@ -397,7 +395,7 @@ impl<T, V> ExtensionIdentifier for RepeatedExtension<T, V>
 impl<T, V> ExtensionIdentifier for RepeatedExtension<T, Packed<V>>
     where
         T: ExtendableMessage + 'static,
-        V: Value + Packable + Wrapper + 'static,
+        V: Value + Packable + 'static,
         V::Inner: Clone + PartialEq + Debug + Send + Sync
 {
     fn field_number(&self) -> FieldNumber {
@@ -423,7 +421,7 @@ impl<T, V> ExtensionIdentifier for RepeatedExtension<T, Packed<V>>
 impl<T, V> ExtensionType for RepeatedExtension<T, V>
     where
         T: ExtendableMessage + 'static,
-        V: Value + Wrapper + 'static,
+        V: Value + 'static,
         V::Inner: Clone + PartialEq + Debug + Send + Sync
 {
     type Entry = internal::RepeatedExtensionValue<V>;
@@ -445,7 +443,7 @@ impl<T, V> ExtensionType for RepeatedExtension<T, V>
 impl<T, V> ExtensionType for RepeatedExtension<T, Packed<V>>
     where
         T: ExtendableMessage + 'static,
-        V: Value + Packable + Wrapper + 'static,
+        V: Value + Packable + 'static,
         V::Inner: Clone + PartialEq + Debug + Send + Sync
 {
     type Entry = internal::RepeatedExtensionValue<Packed<V>>;
@@ -588,7 +586,7 @@ impl<T: ExtendableMessage + 'static> ExtensionSet<T> {
     /// Gets the value of the specified extension from the set or the default value for the extension if it exists
     pub fn value_or_default<'a, 'e: 'a, V, D>(&'a self, extension: &'e Extension<T, V, D>) -> Option<&'a D>
         where
-            V: Wrapper + Value + 'static,
+            V: Value + 'static,
             V::Inner: Borrow<D> + Mergable + Clone + PartialEq + Debug + Send + Sync,
             D: ?Sized + ToOwned<Owned = V::Inner> + Sync + 'static
     {
