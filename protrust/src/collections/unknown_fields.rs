@@ -129,12 +129,12 @@ impl UnknownFieldSet {
     fn add_field_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         if let Some(last_tag) = input.last_tag() {
             match last_tag.wire_type() {
-                WireType::Varint => self.push_value(last_tag.number(), UnknownField::Varint(input.read_varint64()?)),
-                WireType::Bit64 => self.push_value(last_tag.number(), UnknownField::Bit64(input.read_bit64()?)),
-                WireType::LengthDelimited => self.push_value(last_tag.number(), UnknownField::LengthDelimited(input.read_length_delimited()?)),
+                WireType::Varint => self.push_value(last_tag.field(), UnknownField::Varint(input.read_varint64()?)),
+                WireType::Bit64 => self.push_value(last_tag.field(), UnknownField::Bit64(input.read_bit64()?)),
+                WireType::LengthDelimited => self.push_value(last_tag.field(), UnknownField::LengthDelimited(input.read_length_delimited()?)),
                 WireType::StartGroup => {
                     let mut group = UnknownFieldSet::new();
-                    let end_tag = Tag::new(last_tag.number(), WireType::EndGroup);
+                    let end_tag = Tag::new(last_tag.field(), WireType::EndGroup);
                     while let Some(tag) = input.read_tag()? {
                         if tag != end_tag {
                             group.add_field_from(input)?;
@@ -142,9 +142,9 @@ impl UnknownFieldSet {
                             break;
                         }
                     }
-                    self.push_value(last_tag.number(), UnknownField::Group(group));
+                    self.push_value(last_tag.field(), UnknownField::Group(group));
                 },
-                WireType::Bit32 => self.push_value(last_tag.number(), UnknownField::Bit32(input.read_bit32()?)),
+                WireType::Bit32 => self.push_value(last_tag.field(), UnknownField::Bit32(input.read_bit32()?)),
                 WireType::EndGroup => unreachable!()
             }
         }

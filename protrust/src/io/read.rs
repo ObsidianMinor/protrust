@@ -1557,7 +1557,7 @@ impl<T: Input> CodedReader<T> {
                 WireType::Bit64 => self.inner.skip_bit64()?,
                 WireType::LengthDelimited => self.inner.skip_length_delimited()?,
                 WireType::StartGroup => {
-                    let end = Tag::new(last_tag.number(), WireType::EndGroup);
+                    let end = Tag::new(last_tag.field(), WireType::EndGroup);
                     loop {
                         match self.read_tag()? {
                             Some(tag) if tag == end => break,

@@ -207,7 +207,7 @@ impl Tag {
     /// assert_eq!(Tag::try_from(17).unwrap().number().get(), 2);
     /// ```
     #[inline]
-    pub fn number(self) -> FieldNumber {
+    pub fn field(self) -> FieldNumber {
         unsafe { FieldNumber::new_unchecked(self.get() >> 3) }
     }
 

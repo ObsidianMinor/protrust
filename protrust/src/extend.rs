@@ -176,7 +176,7 @@ mod internal {
 
         fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>> {
             let tag = input.last_tag().unwrap();
-            let num = tag.number();
+            let num = tag.field();
             let wt = tag.wire_type();
             if self.num == num && (wt == V::WIRE_TYPE || (V::WIRE_TYPE.is_packable() && wt == WireType::LengthDelimited)) {
                 input.add_entries_to::<_, V>(&mut self.value).map(TryReadValue::Consumed)
@@ -226,7 +226,7 @@ mod internal {
 
         fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>> {
             let tag = input.last_tag().unwrap();
-            let num = tag.number();
+            let num = tag.field();
             let wt = tag.wire_type();
             if self.num == num && (wt == WireType::LengthDelimited || wt == V::WIRE_TYPE) {
                 input.add_entries_to::<_, Packed<V>>(&mut self.value).map(TryReadValue::Consumed)
@@ -610,7 +610,7 @@ impl<T: ExtendableMessage + 'static> Sealed for ExtensionSet<T> { }
 impl<T: ExtendableMessage + 'static> FieldSet for ExtensionSet<T> {
     fn try_add_field_from<'a, U: Input>(&mut self, input: &'a mut CodedReader<U>) -> read::Result<TryRead<'a, U>> {
         if let Some(tag) = input.last_tag() {
-            let field = tag.number();
+            let field = tag.field();
             match self.by_num.entry(field) {
                 hash_map::Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
