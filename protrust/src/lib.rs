@@ -47,7 +47,7 @@ pub use collections::unknown_fields::UnknownFieldSet;
 /// 
 /// # Examples
 /// 
-/// ```
+/// ```ignore
 /// # use protrust::doctest::timestamp::Timestamp;
 /// use protrust::Message;
 /// use protrust::io::{Length, CodedReader, CodedWriter};
@@ -82,7 +82,7 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
     /// 
     /// # Examples
     /// 
-    /// ```
+    /// ```ignore
     /// # use protrust::doctest::timestamp::Timestamp;
     /// use protrust::Message;
     /// use protrust::io::{Length, CodedReader};
@@ -106,7 +106,7 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
     /// 
     /// # Examples
     /// 
-    /// ```
+    /// ```ignore
     /// # use protrust::doctest::timestamp::Timestamp;
     /// use protrust::Message;
     /// 
@@ -126,7 +126,7 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
     /// 
     /// # Examples
     /// 
-    /// ```
+    /// ```ignore
     /// # use protrust::doctest::timestamp::Timestamp;
     /// use protrust::Message;
     /// use protrust::collections::unknown_fields::UnknownField;
@@ -149,7 +149,7 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
     /// 
     /// # Examples
     /// 
-    /// ```
+    /// ```ignore
     /// # use protrust::doctest::timestamp::Timestamp;
     /// use protrust::Message;
     /// use protrust::collections::unknown_fields::UnknownField;
@@ -177,7 +177,7 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
     /// 
     /// # Examples
     /// 
-    /// ```
+    /// ```ignore
     /// # use protrust::doctest::timestamp::Timestamp;
     /// use protrust::Message;
     /// 
@@ -295,7 +295,7 @@ pub trait Enum: From<i32> + Into<i32> + Default + Clone + Copy + PartialEq + Eq 
 /// 
 /// # Examples
 /// 
-/// ```
+/// ```ignore
 /// # use protrust::doctest::timestamp::Timestamp;
 /// use protrust::{Mergable, Message};
 /// 
@@ -321,7 +321,7 @@ pub trait Mergable<T = Self>: Sized {
 /// 
 /// # Examples
 /// 
-/// ```
+/// ```ignore
 /// # use protrust::doctest::timestamp::Timestamp;
 /// use protrust::{Message, merge};
 /// 
