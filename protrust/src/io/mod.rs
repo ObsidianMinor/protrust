@@ -7,14 +7,11 @@ pub mod write;
 pub use read::{Input, CodedReader};
 pub use write::{Output, CodedWriter};
 
-use alloc::alloc::Layout;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::fmt::{self, Display, Formatter};
-use core::mem;
 use core::num::NonZeroU32;
-use core::slice;
 use crate::collections::{RepeatedValue, FieldSet};
 use crate::raw::Value;
 
@@ -411,18 +408,13 @@ pub trait ByteString: AsRef<[u8]> + AsMut<[u8]> {
 
 impl ByteString for Box<[u8]> {
     fn new(len: usize) -> Self {
-        unsafe {
-            let layout = Layout::from_size_align_unchecked(len, mem::align_of::<u8>());
-            let ptr = alloc::alloc::alloc(layout);
-            let slice = slice::from_raw_parts_mut(ptr, len);
-            Box::from_raw(slice)
-        }
+        <Vec<u8> as ByteString>::new(len).into_boxed_slice()
     }
 }
 
 impl ByteString for Vec<u8> {
     fn new(len: usize) -> Self {
-        <Box<[u8]> as ByteString>::new(len).into_vec()
+        alloc::vec![0; len]
     }
 }
 
