@@ -226,18 +226,18 @@ mod internal {
                 Ok(s)
             }
         }
-        fn read_direct(stream: &mut dyn Read, buf: &mut [u8], limit: &mut i32) -> Result<()> {
-            if *limit < 0 {
+        fn read_direct(BorrowedStream { input: stream, remaining_limit: limit, .. }: &mut BorrowedStream, buf: &mut [u8]) -> Result<()> {
+            if **limit < 0 {
                 stream.read_exact(buf).map_err(Into::into)
             } else {
-                let remaining_limit = *limit as usize;
+                let remaining_limit = **limit as usize;
                 if remaining_limit == 0 {
                     Err(stream::Error.into())
                 } else if remaining_limit >= buf.len() {
-                    *limit = i32::wrapping_sub(*limit, buf.len() as i32);
+                    **limit = i32::wrapping_sub(**limit, buf.len() as i32);
                     stream.read_exact(buf).map_err(Into::into)
                 } else {
-                    *limit = 0;
+                    **limit = 0;
                     stream.read_exact(&mut buf[..remaining_limit])?;
                     Err(stream::Error.into())
                 }
@@ -307,26 +307,24 @@ mod internal {
             let mut remaining_slice = self.read_buffer_partial(slice)?;
 
             if !remaining_slice.is_empty() {
-                if let Some(BorrowedStream { input, buf, remaining_limit, .. }) = &mut self.stream {
+                match &mut self.stream {
                     // if the remaining amnt to read is more than or equal to
                     // the size of the buffer then we read direct from the stream
                     // and adjust our remaining limit accordingly
-                    if remaining_slice.len() >= buf.len() {
-                        Self::read_direct(input, remaining_slice, remaining_limit)?;
-                    } else {
+                    Some(stream) if remaining_slice.len() >= stream.buf.len() => {
+                        Self::read_direct(stream, remaining_slice)
+                    },
+                    Some(_) => {
                         loop {
                             self.refresh()?;
                             remaining_slice = self.read_buffer_partial(slice)?;
 
                             if remaining_slice.is_empty() {
-                                break;
+                                break Ok(());
                             }
                         }
-                    }
-
-                    Ok(())
-                } else {
-                    Err(stream::Error.into())
+                    },
+                    None => Err(stream::Error.into())
                 }
             } else {
                 Ok(())
@@ -563,7 +561,7 @@ mod internal {
                     self.stream
                         .as_mut()
                         .map(|BorrowedStream { input, buf, remaining_limit, reached_eof }|
-                              BorrowedStream { input, buf, remaining_limit, reached_eof }),
+                              BorrowedStream { input: *input, buf, remaining_limit, reached_eof }),
                 buffer: &mut self.buffer,
                 last_tag: &mut self.last_tag
             }
