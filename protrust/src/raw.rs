@@ -177,15 +177,13 @@ impl Value for Sint32 {
     const WIRE_TYPE: WireType = WireType::Varint;
 
     fn calculate_size(&this: &Self::Inner, builder: LengthBuilder) -> Option<LengthBuilder> {
-        let n = this as u32;
-        builder.add_bytes(io::raw_varint32_size((n << 1) ^ (n >> 31)))
+        builder.add_bytes(io::raw_varint32_size(((this << 1) ^ (this >> 31)) as u32))
     }
     fn merge_from<T: Input>(this: &mut Self::Inner, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *this = v)
     }
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
-        let n = this as u32;
-        output.write_varint32((n << 1) ^ (n >> 31))
+        output.write_varint32(((this << 1) ^ (this >> 31)) as u32)
     }
     fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
@@ -204,15 +202,13 @@ impl Value for Sint64 {
     const WIRE_TYPE: WireType = WireType::Varint;
 
     fn calculate_size(&this: &Self::Inner, builder: LengthBuilder) -> Option<LengthBuilder> {
-        let n = this as u64;
-        builder.add_bytes(io::raw_varint64_size((n << 1) ^ (n >> 63)))
+        builder.add_bytes(io::raw_varint64_size(((this << 1) ^ (this >> 63)) as u64))
     }
     fn merge_from<T: Input>(this: &mut Self::Inner, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *this = v)
     }
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
-        let n = this as u64;
-        output.write_varint64((n << 1) ^ (n >> 63))
+        output.write_varint64(((this << 1) ^ (this >> 63)) as u64)
     }
     fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
