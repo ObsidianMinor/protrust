@@ -48,19 +48,19 @@ pub enum WireType {
     ///
     /// See the protobuf docs for more information on this encoding: https://developers.google.com/protocol-buffers/docs/encoding#varints
     Varint = 0,
-    /// A 64-bit value encoded as 8 little endian bytes
+    /// A 64-bit value encoded as 8 little endian bytes.
     Bit64 = 1,
-    /// A length delimited value. The length is encoded as a varint
+    /// A length delimited value. The length is encoded as a varint.
     LengthDelimited = 2,
     /// A start group tag, deprecated in proto3.
     StartGroup = 3,
     /// An end group tag, deprecated in proto3.
     EndGroup = 4,
-    /// A 32-bit value encoded as 4 little endian bytes
+    /// A 32-bit value encoded as 4 little endian bytes.
     Bit32 = 5,
 }
 
-/// The error struct used when trying to convert from an byte to a wire type
+/// The error struct used when trying to convert from an byte to a wire type.
 #[derive(Debug)]
 pub struct InvalidWireType;
 
@@ -78,7 +78,7 @@ impl TryFrom<u8> for WireType {
     type Error = InvalidWireType;
 
     fn try_from(value: u8) -> Result<WireType, InvalidWireType> {
-        match value & 0b111 {
+        match value {
             0 => Ok(WireType::Varint),
             1 => Ok(WireType::Bit64),
             2 => Ok(WireType::LengthDelimited),
@@ -96,23 +96,23 @@ impl TryFrom<u8> for WireType {
 pub struct FieldNumber(NonZeroU32);
 
 impl FieldNumber {
-    /// The max value of a field number as a u32
+    /// The max value of a field number as a [u32](https://doc.rust-lang.org/nightly/std/primitive.u32.html).
     pub const MAX_VALUE: u32 = 536_870_911;
 
-    /// The max value of a field number
+    /// The max value of a field number.
     pub const MAX: FieldNumber = unsafe { FieldNumber::new_unchecked(FieldNumber::MAX_VALUE) };
 
     /// Create a field number without checking the value.
     ///
     /// # Safety
     ///
-    /// The value must be a valid field number
+    /// The value must be a valid field number.
     #[inline]
     pub const unsafe fn new_unchecked(n: u32) -> FieldNumber {
         FieldNumber(NonZeroU32::new_unchecked(n))
     }
 
-    /// Creates a field number if the given value is not zero or more than 536870911
+    /// Creates a field number if the given value is not zero or more than 536870911.
     /// 
     /// # Examples
     /// 
@@ -152,7 +152,7 @@ impl From<FieldNumber> for u32 {
     }
 }
 
-/// A tag containing a wire type and field number. Its value is known to not be 0, and both field number and wire type are valid values
+/// A tag containing a wire type and field number. Its value is known to not be 0, and both field number and wire type are valid values.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tag(NonZeroU32);
@@ -162,25 +162,48 @@ impl Tag {
     ///
     /// # Safety
     ///
-    /// The value must be a valid tag
+    /// The value must be a valid tag.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::{FieldNumber, WireType, Tag};
+    /// 
+    /// let tag = unsafe { Tag::new_unchecked(8) };
+    /// 
+    /// assert_eq!(tag.get(), 8);
+    /// assert_eq!(tag.field().get(), 1);
+    /// assert_eq!(tag.wire_type(), WireType::Varint);
+    /// ```
     #[inline]
     pub const unsafe fn new_unchecked(n: u32) -> Tag {
         Tag(NonZeroU32::new_unchecked(n))
     }
 
-    /// Creates a new tag value
+    /// Creates a new tag value with the specified field number and wire type.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::{FieldNumber, WireType, Tag};
+    /// 
+    /// let field = FieldNumber::new(1).unwrap();
+    /// let tag = Tag::new(field, WireType::Varint);
+    /// 
+    /// assert_eq!(tag.get(), 8);
+    /// ```
     #[inline]
     pub const fn new(f: FieldNumber, wt: WireType) -> Tag {
         unsafe { Tag(NonZeroU32::new_unchecked((f.get() << 3) | wt as u32)) }
     }
 
-    /// Gets the wire type from this tag
+    /// Gets the wire type from this tag.
     /// 
     /// # Examples
     /// 
     /// ```
     /// use protrust::io::{Tag, WireType};
-    /// # use std::convert::TryFrom;
+    /// use core::convert::TryFrom;
     /// 
     /// assert_eq!(Tag::try_from(8).unwrap().wire_type(), WireType::Varint);
     /// assert_eq!(Tag::try_from(17).unwrap().wire_type(), WireType::Bit64);
@@ -194,23 +217,32 @@ impl Tag {
         }
     }
 
-    /// Gets the field number from this tag
+    /// Gets the field number from this tag.
     /// 
     /// # Examples
     /// 
     /// ```
     /// use protrust::io::Tag;
-    /// # use std::convert::TryFrom;
+    /// use core::convert::TryFrom;
     /// 
-    /// assert_eq!(Tag::try_from(8).unwrap().number().get(), 1);
-    /// assert_eq!(Tag::try_from(17).unwrap().number().get(), 2);
+    /// assert_eq!(Tag::try_from(8).unwrap().field().get(), 1);
+    /// assert_eq!(Tag::try_from(17).unwrap().field().get(), 2);
     /// ```
     #[inline]
     pub fn field(self) -> FieldNumber {
         unsafe { FieldNumber::new_unchecked(self.get() >> 3) }
     }
 
-    /// Returns the value as a [`u32`](https://doc.rust-lang.org/nightly/std/primitive.u32.html)
+    /// Returns the value as a [`u32`](https://doc.rust-lang.org/nightly/std/primitive.u32.html).
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::{FieldNumber, WireType, Tag};
+    /// 
+    /// let tag = Tag::new(FieldNumber::new(1).unwrap(), WireType::Varint);
+    /// assert_eq!(tag.get(), 8);
+    /// ```
     #[inline]
     pub const fn get(self) -> u32 {
         self.0.get()
@@ -230,6 +262,20 @@ impl From<Tag> for u32 {
 }
 
 /// The error returned when an attempt to convert a 32-bit value to a tag fails due to an invalid field number or wire type.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use protrust::io::Tag;
+/// use core::convert::TryFrom;
+/// 
+/// // invalid field number 0
+/// assert!(Tag::try_from(0).is_err());
+/// 
+/// // invalid wire types 6 and 7
+/// assert!(Tag::try_from(14).is_err());
+/// assert!(Tag::try_from(15).is_err());
+/// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TryTagFromRawError(());
 
@@ -245,18 +291,18 @@ impl Error for TryTagFromRawError { }
 impl TryFrom<u32> for Tag {
     type Error = TryTagFromRawError;
 
-    /// Creates a new tag if the value is not zero and has a valid field number and wire type
+    /// Creates a new tag if the value has a valid field number and wire type.
     ///
     /// # Examples
     ///
     /// ```
     /// use protrust::io::Tag;
-    /// # use std::convert::TryFrom;
+    /// use core::convert::TryFrom;
     ///
-    /// assert!(Tag::try_from(1).is_err());
+    /// assert!(Tag::try_from(1).is_err()); // invalid field number 0
     /// assert!(Tag::try_from(8).is_ok());
     /// assert!(Tag::try_from(16).is_ok());
-    /// assert!(Tag::try_from(14).is_err());
+    /// assert!(Tag::try_from(14).is_err()); // invalid wire type 6
     /// ```
     #[inline]
     fn try_from(n: u32) -> Result<Tag, TryTagFromRawError> {
@@ -268,7 +314,19 @@ impl TryFrom<u32> for Tag {
     }
 }
 
-/// An opaque type that represents the length of a delimited value
+/// An opaque type that represents the length of a delimited value. This value cannot be negative.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use protrust::io::Length;
+/// use protrust::raw;
+/// 
+/// // calculate the size of -1 in 3 different signed int encodings
+/// assert_eq!(Length::of_value::<raw::Int32>(&-1), Length::new(10));
+/// assert_eq!(Length::of_value::<raw::Sint32>(&-1), Length::new(1));
+/// assert_eq!(Length::of_value::<raw::Sfixed32>(&-1), Length::new(4));
+/// ```
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Length(i32);
 
@@ -279,13 +337,32 @@ impl Display for Length {
 }
 
 impl Length {
-    /// Returns the value as a [`i32`](https://doc.rust-lang.org/nightly/std/primitive.i32.html)
+    /// Returns the value as a [`i32`](https://doc.rust-lang.org/nightly/std/primitive.i32.html).
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::Length;
+    /// 
+    /// let len = Length::new(1).unwrap();
+    /// let one = len.get();
+    /// ```
     #[inline]
     pub const fn get(self) -> i32 {
         self.0
     }
 
-    /// Makes a new length from the specified [`i32`], returning [`None`] if the value is negative
+    /// Makes a new length from the specified [`i32`], returning [`None`] if the value is negative.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::Length;
+    /// 
+    /// assert!(Length::new(0).is_some());
+    /// assert!(Length::new(1).is_some());
+    /// assert!(Length::new(-1).is_none());
+    /// ```
     /// 
     /// [`i32`]: https://doc.rust-lang.org/nightly/std/primitive.i32.html
     /// [`None`]: https://doc.rust-lang.org/nightly/std/option/enum.Option.html#variant.None
@@ -301,22 +378,85 @@ impl Length {
     /// 
     /// # Safety
     /// 
-    /// Providing a negative value may cause 
+    /// Providing a negative value may cause undefined behavior
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::Length;
+    /// 
+    /// let len = unsafe { Length::new_unchecked(5) };
+    /// assert_eq!(len.get(), 5);
+    /// ```
     pub const unsafe fn new_unchecked(x: i32) -> Length {
         Length(x)
     }
 
-    /// Returns the length of the value in the specified form
+    /// Returns the length of the value in the specified form.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::Length;
+    /// use protrust::raw;
+    /// 
+    /// // calculate the size of -1 in 3 different signed int encodings
+    /// assert_eq!(Length::of_value::<raw::Int32>(&-1), Length::new(10));
+    /// assert_eq!(Length::of_value::<raw::Sint32>(&-1), Length::new(1));
+    /// assert_eq!(Length::of_value::<raw::Sfixed32>(&-1), Length::new(4));
+    /// ```
     pub fn of_value<V: Value>(value: &V::Inner) -> Option<Length> {
         LengthBuilder::new().add_value::<V>(value).map(LengthBuilder::build)
     }
 
-    /// Returns the length of the set of values with the specified tag
+    /// Returns the length of the set of values with the specified field number.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::{Length, FieldNumber};
+    /// use protrust::collections::RepeatedField;
+    /// use protrust::raw;
+    /// 
+    /// // make a field number for our field
+    /// let field = FieldNumber::new(1).unwrap();
+    /// 
+    /// // create a field of values
+    /// let mut values = RepeatedField::new();
+    /// values.push(0);
+    /// values.push(1);
+    /// values.push(-1);
+    /// 
+    /// // size as an unpacked sint32 field
+    /// // (1 byte tag + 1 byte value) * 3 values
+    /// assert_eq!(Length::of_values::<_, raw::Sint32>(&values, field), Length::new(6));
+    /// 
+    /// // size as a packed sint32 field
+    /// // (1 byte tag + 1 byte length) + 3 values * 1 byte
+    /// assert_eq!(Length::of_values::<_, raw::Packed<raw::Sint32>>(&values, field), Length::new(5));
+    /// ```
     pub fn of_values<T: RepeatedValue<V>, V>(value: &T, num: FieldNumber) -> Option<Length> {
         LengthBuilder::new().add_values::<T, V>(value, num).map(LengthBuilder::build)
     }
 
-    /// Returns the length of the field set
+    /// Returns the length of the field set.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::collections::unknown_fields::{UnknownFieldSet, UnknownField};
+    /// use protrust::io::{FieldNumber, Length};
+    /// 
+    /// let field = FieldNumber::new(1).unwrap();
+    /// 
+    /// let mut set = UnknownFieldSet::new();
+    /// set.push_value(field, UnknownField::Varint(1));
+    /// set.push_value(field, UnknownField::Varint(2));
+    /// set.push_value(field, UnknownField::Varint(3));
+    /// 
+    /// // (1 byte tag + 1 byte value) * 3 values
+    /// assert_eq!(Length::of_fields(&set), Length::new(6));
+    /// ```
     pub fn of_fields<T: FieldSet>(value: &T) -> Option<Length> {
         LengthBuilder::new().add_fields::<T>(value).map(LengthBuilder::build)
     }
