@@ -495,3 +495,117 @@ impl<T: TraitMessage> Value for Group<T> {
         Ok(t)
     }
 }
+
+#[cfg(test)]
+mod test {
+    macro_rules! test_cases {
+        ($t:ty => {
+            $($tt:tt = $id:ident => $tokens:tt),*
+        }) => {
+            $(
+                case!($t => $tt = $id => $tokens);
+            )*
+        };
+    }
+
+    macro_rules! case {
+        ($t:ty => write = $id:ident => {
+            $(($i:expr, $o:expr)),+
+        }) => {
+            #[test]
+            fn $id() {
+                $({
+                    use crate::io::CodedWriter;
+
+                    let value = $i;
+                    let expected = $o;
+                    let mut output = alloc::vec![0; expected.len()].into_boxed_slice();
+                    let mut writer = CodedWriter::with_slice(&mut output);
+
+                    writer.write_value::<$t>(&value).expect("failed to write value");
+
+                    let remaining = writer.into_inner();
+
+                    assert!(remaining.is_empty());
+                    assert_eq!(output.as_ref(), &expected);
+                })+
+            }
+        };
+        ($t:ty => size = $id:ident => {
+            $(($i:expr, $s:expr)),+
+        }) => {
+            #[test]
+            fn $id() {
+                use crate::io::Length;
+
+                $(
+                    let input = $i;
+                    assert_eq!(Length::of_value::<$t>(&input), $s);
+                )+
+            }
+        };
+    }
+
+    mod int32 {
+        test_cases! {
+            crate::raw::Int32 => {
+                write = write_int32 => {
+                    (0, [0]),
+                    (1, [1]),
+                    (2, [2]),
+                    (128, [128, 1]),
+                    (-1, [255, 255, 255, 255, 255, 255, 255, 255, 255, 1])
+                },
+                size = calculate_int32_sizes => {
+                    (0, Length::new(1)),
+                    (1, Length::new(1))
+                }
+            }
+        }
+    }
+    mod uint32 {
+
+    }
+    mod int64 {
+
+    }
+    mod uint64 {
+
+    }
+    mod sint32 {
+
+    }
+    mod sint64 {
+
+    }
+    mod fixed32 {
+
+    }
+    mod fixed64 {
+
+    }
+    mod sfixed32 {
+
+    }
+    mod sfixed64 {
+
+    }
+    mod r#bool {
+
+    }
+    mod string {
+
+    }
+    mod bytes {
+
+    }
+    mod r#enum {
+
+    }
+    mod message {
+
+    }
+    mod group {
+
+    }
+}
