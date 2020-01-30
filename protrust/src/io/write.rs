@@ -151,7 +151,7 @@ mod internal {
                 Some(w) => {
                     Some(BorrowedStream {
                         output: *w,
-                        start: self.start.map(NonNull::as_ptr).unwrap_or(ptr::null_mut()),
+                        start: self.start.map(NonNull::as_ptr).unwrap_or(ptr::null_mut()), // unchecked unwrap
                         current: self.current,
                         end: self.end.map(NonNull::as_ptr).unwrap_or(ptr::null_mut())
                     })
@@ -291,6 +291,7 @@ impl<T: Writer> Output for T { }
 unsafe fn write_varint32_unchecked(mut value: u32, ptr: &mut *mut u8) {
     for _ in 0..5 {
         **ptr = value as u8 & 0x7f;
+        value >>= 7;
 
         if value == 0 {
             *ptr = ptr.add(1);
@@ -299,8 +300,6 @@ unsafe fn write_varint32_unchecked(mut value: u32, ptr: &mut *mut u8) {
             **ptr |= 0x80;
             *ptr = ptr.add(1);
         }
-
-        value >>= 7;
     }
 }
 
@@ -308,6 +307,7 @@ unsafe fn write_varint32_unchecked(mut value: u32, ptr: &mut *mut u8) {
 unsafe fn write_varint64_unchecked(mut value: u64, ptr: &mut *mut u8) {
     for _ in 0..10 {
         **ptr = value as u8 & 0x7f;
+        value >>= 7;
 
         if value == 0 {
             *ptr = ptr.add(1);
@@ -316,8 +316,6 @@ unsafe fn write_varint64_unchecked(mut value: u64, ptr: &mut *mut u8) {
             **ptr |= 0x80;
             *ptr = ptr.add(1);
         }
-
-        value >>= 7;
     }
 }
 
@@ -340,10 +338,16 @@ unsafe fn write_bytes_unchecked(slice: &[u8], ptr: &mut *mut u8) {
 pub struct SliceUnchecked<'a> {
     a: PhantomData<&'a mut [u8]>,
     ptr: *mut u8,
+    end: *mut u8,
 }
 impl<'a> SliceUnchecked<'a> {
     fn new(s: &'a mut [u8]) -> Self {
-        Self { a: PhantomData, ptr: s.as_mut_ptr() }
+        let Range { start, end } = s.as_mut_ptr_range();
+        Self { a: PhantomData, ptr: start, end }
+    }
+    fn into_inner(self) -> &'a mut [u8] {
+        let len = usize::wrapping_sub(self.end as _, self.ptr as _);
+        unsafe { slice::from_raw_parts_mut(self.ptr, len) }
     }
 }
 impl Writer for SliceUnchecked<'_> {
@@ -401,6 +405,9 @@ impl<'a> Slice<'a> {
     }
     fn len(&self) -> usize {
         usize::wrapping_sub(self.start as _, self.end as _)
+    }
+    fn into_inner(self) -> &'a mut [u8] {
+        unsafe { slice::from_raw_parts_mut(self.start, self.len()) }
     }
 }
 impl Writer for Slice<'_> {
@@ -612,12 +619,20 @@ impl<'a> CodedWriter<Slice<'a>> {
     pub fn with_slice(s: &'a mut [u8]) -> Self {
         Self { inner: Slice::new(s), }
     }
+    /// Returns ownership of the buffer at the current point in the slice
+    pub fn into_inner(self) -> &'a mut [u8] {
+        self.inner.into_inner()
+    }
 }
 
 impl<'a> CodedWriter<SliceUnchecked<'a>> {
     /// Creates a coded writer that writes to the specified slice without performing any length checks
     pub unsafe fn with_slice_unchecked(s: &'a mut [u8]) -> Self {
         Self { inner: SliceUnchecked::new(s) }
+    }
+    /// Returns ownership of the buffer at the current point in the slice.
+    pub fn into_inner(self) -> &'a mut [u8] {
+        self.inner.into_inner()
     }
 }
 
@@ -715,5 +730,168 @@ impl<T: Output> CodedWriter<T> {
 
 #[cfg(test)]
 mod test {
-    
+    use crate::io::write::{self, Any, Output, CodedWriter};
+
+    pub trait WriterOutput<'a> {
+        type Writer: Output + 'a;
+
+        fn new(b: &'a mut [u8]) -> CodedWriter<Self::Writer>;
+        fn into_inner(w: CodedWriter<Self::Writer>) -> Result<&'a mut [u8], write::Error>;
+
+        fn run<F: FnOnce(&mut CodedWriter<Self::Writer>) -> write::Result>(b: &'a mut [u8], f: F) -> Result<&'a mut [u8], write::Error> {
+            let mut writer = Self::new(b);
+            f(&mut writer)?;
+            Self::into_inner(writer)
+        }
+
+        fn run_any<F: FnOnce(&mut CodedWriter<Any>) -> write::Result>(b: &'a mut [u8], f: F) -> Result<&'a mut [u8], write::Error> {
+            let mut writer = Self::new(b);
+            let mut any = writer.as_any();
+            f(&mut any)?;
+            Self::into_inner(writer)
+        }
+    }
+
+    macro_rules! test {
+        ($(($ti:ident | $tia:ident) = |$f:ident| $t:block => $x:expr),+) => {
+            $(
+                pub fn $ti<T>() where for<'a> T: WriterOutput<'a> {
+                    let expected = &$x;
+                    let mut output = alloc::vec![0; expected.len()].into_boxed_slice();
+
+                    let remaining = T::run(&mut output, |$f| $t).expect("test failed");
+
+                    assert!(remaining.is_empty());
+                    assert_eq!(expected, output.as_ref());
+                }
+
+                pub fn $tia<T>() where for<'a> T: WriterOutput<'a> {
+                    let expected = &$x;
+                    let mut output = alloc::vec![0; expected.len()].into_boxed_slice();
+
+                    let remaining = T::run_any(&mut output, |$f| $t).expect("test failed");
+
+                    assert!(remaining.is_empty());
+                    assert_eq!(expected, output.as_ref());
+                }
+            )+
+        };
+    }
+
+    test! {
+        (write_tag | write_tag_any) = |w| {
+            use crate::io::Tag;
+            use core::convert::TryFrom;
+
+            w.write_tag(Tag::try_from(8).unwrap())
+        } => [8]
+    }
+
+    macro_rules! run {
+        (
+            $f:ty => {
+                $($t:ident),*
+            }
+        ) => {
+            $(
+                #[test]
+                fn $t() {
+                    crate::io::write::test::$t::<$f>();
+                }
+            )*
+        };
+    }
+
+    macro_rules! run_suite {
+        ($f:ty) => {
+            run! {
+                $f => {
+                    write_tag, write_tag_any
+                }
+            }
+        };
+    }
+
+    mod suites {
+        mod slice {
+            use crate::io::write::{self, Slice, CodedWriter, test::WriterOutput};
+
+            pub struct SliceOutput;
+            impl<'a> WriterOutput<'a> for SliceOutput {
+                type Writer = Slice<'a>;
+
+                fn new(b: &'a mut [u8]) -> CodedWriter<Self::Writer> {
+                    CodedWriter::with_slice(b)
+                }
+                fn into_inner(w: CodedWriter<Self::Writer>) -> Result<&'a mut [u8], write::Error> {
+                    Ok(w.into_inner())
+                }
+            }
+
+            run_suite!(SliceOutput);
+        }
+        mod slice_unchecked {
+            use crate::io::write::{self, SliceUnchecked, CodedWriter, test::WriterOutput};
+
+            pub struct SliceUncheckedOutput;
+            impl<'a> WriterOutput<'a> for SliceUncheckedOutput {
+                type Writer = SliceUnchecked<'a>;
+
+                fn new(b: &'a mut [u8]) -> CodedWriter<Self::Writer> {
+                    unsafe { CodedWriter::with_slice_unchecked(b) }
+                }
+                fn into_inner(w: CodedWriter<Self::Writer>) -> Result<&'a mut [u8], write::Error> {
+                    Ok(w.into_inner())
+                }
+            }
+
+            run_suite!(SliceUncheckedOutput);
+        }
+        mod stream {
+            macro_rules! stream_case {
+                ($i:ident($s:expr)) => {
+                    use crate::io::write::{self, CodedWriter, Stream, test::WriterOutput};
+
+                    pub struct $i;
+
+                    impl<'a> WriterOutput<'a> for $i {
+                        type Writer = Stream<&'a mut [u8]>;
+
+                        fn new(b: &'a mut [u8]) -> CodedWriter<Self::Writer> {
+                            CodedWriter::with_capacity($s, b)
+                        }
+                        fn into_inner(mut w: CodedWriter<Self::Writer>) -> Result<&'a mut [u8], write::Error> {
+                            w.flush()?;
+                            Ok(w.into_inner())
+                        }
+                    }
+                };
+            }
+
+            mod default {
+                stream_case!(StreamDefaultBuffer(crate::io::DEFAULT_BUF_SIZE));
+                run_suite!(StreamDefaultBuffer);
+            }
+
+            mod no_buffer {
+                stream_case!(StreamNoBuffer(0));
+                run_suite!(StreamNoBuffer);
+            }
+
+            mod byte1_buffer {
+                stream_case!(StreamTinyBuffer(1));
+                run_suite!(StreamTinyBuffer);
+            }
+
+            mod byte5_buffer {
+                stream_case!(StreamTinyBuffer(5));
+                run_suite!(StreamTinyBuffer);
+            }
+
+            mod byte10_buffer {
+                stream_case!(StreamTinyBuffer(10));
+                run_suite!(StreamTinyBuffer);
+            }
+        }
+    }
 }
