@@ -9,13 +9,11 @@ use core::marker::PhantomData;
 use core::result;
 use crate::collections::{RepeatedValue, FieldSet, TryRead};
 use crate::extend::ExtensionRegistry;
-use crate::io::{Tag, WireType, ByteString, stream::{self, Read}};
+use crate::io::{Tag, WireType, ByteString, DEFAULT_BUF_SIZE, stream::{self, Read}};
 use crate::raw::{self, Value};
 
 #[cfg(feature = "std")]
 use std::error;
-
-const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
 mod internal {
     use core::cmp::Ordering;
@@ -1928,7 +1926,7 @@ mod test {
             }
 
             mod default {
-                stream_case!(StreamDefaultBuffer(crate::io::read::DEFAULT_BUF_SIZE));
+                stream_case!(StreamDefaultBuffer(crate::io::DEFAULT_BUF_SIZE));
                 run_suite!(StreamDefaultBuffer);
             }
 

@@ -36,6 +36,8 @@ mod internal {
     fva!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
 }
 
+const DEFAULT_BUF_SIZE: usize = 8 * 1024;
+
 /// The wire type of a protobuf value.
 ///
 /// A wire type is paired with a field number between 1 and 536,870,911 to create a tag,

@@ -8,14 +8,12 @@ use core::ops::Range;
 use core::ptr::{self, NonNull};
 use core::slice;
 use crate::collections::{RepeatedValue, FieldSet};
-use crate::io::{FieldNumber, WireType, Tag, Length, stream::{self, Write}};
+use crate::io::{FieldNumber, WireType, Tag, Length, DEFAULT_BUF_SIZE, stream::{self, Write}};
 use crate::raw::Value;
 use super::{raw_varint32_size, raw_varint64_size};
 
 #[cfg(feature = "std")]
 use std::error;
-
-const DEFAULT_BUF_CAP: usize = 8 * 1024;
 
 mod internal {
     use core::convert::TryFrom;
@@ -626,7 +624,7 @@ impl<'a> CodedWriter<SliceUnchecked<'a>> {
 impl<T: Write> CodedWriter<Stream<T>> {
     /// Creates a coded writer that writes to the specified stream with the default buffer capacity
     pub fn with_stream(inner: T) -> Self {
-        Self::with_capacity(DEFAULT_BUF_CAP, inner)
+        Self::with_capacity(DEFAULT_BUF_SIZE, inner)
     }
     /// Creates a coded writer that writes to the specified stream with the specified buffer capacity
     pub fn with_capacity(cap: usize, inner: T) -> Self {
