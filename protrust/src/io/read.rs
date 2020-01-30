@@ -1736,13 +1736,13 @@ mod test {
     macro_rules! test {
         ($(($ti:ident | $tia:ident) = $x:expr => |$f:ident| $t:block),+) => {
             $(
-                pub fn $ti<T: ReaderInput<'static>>() {
+                pub fn $ti<T: for<'a> ReaderInput<'a>>() {
                     static INPUT: &'static [u8] = &$x;
 
                     T::run(INPUT, |$f| $t);
                 }
 
-                pub fn $tia<T: ReaderInput<'static>>() {
+                pub fn $tia<T: for<'a> ReaderInput<'a>>() {
                     static INPUT: &'static [u8] = &$x;
 
                     T::run_any(INPUT, |$f| $t);
@@ -1895,17 +1895,18 @@ mod test {
 
     mod suites {
         mod slice {
-            use crate::io::read::{Slice, CodedReader, test::{ReaderInput}};
+            use crate::io::read::{Slice, CodedReader, test::ReaderInput};
 
-            impl<'a> ReaderInput<'a> for Slice<'a> {
-                type Reader = Self;
+            pub struct SliceInput;
+            impl<'a> ReaderInput<'a> for SliceInput {
+                type Reader = Slice<'a>;
 
-                fn new(b: &'a [u8]) -> CodedReader<Self> {
+                fn new(b: &'a [u8]) -> CodedReader<Self::Reader> {
                     CodedReader::with_slice(b)
                 }
             }
 
-            run_suite!(Slice);
+            run_suite!(SliceInput);
         }
 
         mod stream {
