@@ -500,17 +500,17 @@ impl<T: TraitMessage> Value for Group<T> {
 mod test {
     macro_rules! test_cases {
         ($t:ty => {
-            $($tt:tt = $id:ident => $tokens:tt),*
+            $($tt:ident: $id:ident => $tokens:tt),+ $(,)?
         }) => {
             $(
-                case!($t => $tt = $id => $tokens);
+                case!($t => $tt: $id => $tokens);
             )*
         };
     }
 
     macro_rules! case {
-        ($t:ty => write = $id:ident => {
-            $(($i:expr, $o:expr)),+
+        ($t:ty => write: $id:ident => {
+            $($i:expr => $o:expr),+ $(,)?
         }) => {
             #[test]
             fn $id() {
@@ -531,40 +531,97 @@ mod test {
                 })+
             }
         };
-        ($t:ty => size = $id:ident => {
-            $(($i:expr, $s:expr)),+
+        ($t:ty => size: $id:ident => {
+            $($i:expr => $s:expr),+ $(,)?
         }) => {
             #[test]
             fn $id() {
-                use crate::io::Length;
-
-                $(
+                $({
                     let input = $i;
-                    assert_eq!(Length::of_value::<$t>(&input), $s);
-                )+
+                    assert_eq!(crate::io::Length::of_value::<$t>(&input), $s);
+                })+
+            }
+        };
+        ($t:ty => read: $id:ident => {
+            $($i:expr => $o:pat $(if $e:expr)?),+ $(,)?
+        }) => {
+            #[test]
+            fn $id() {
+                $({
+                    use crate::io::CodedReader;
+
+                    let input = $i;
+                    let mut reader = CodedReader::with_slice(&input);
+
+                    let result = reader.read_value::<$t>();
+
+                    assert!(matches!(result, $o $(if $e)?))
+                })+
             }
         };
     }
 
     mod int32 {
+        use crate::io::Length;
+        use crate::raw::Int32;
+
         test_cases! {
-            crate::raw::Int32 => {
-                write = write_int32 => {
-                    (0, [0]),
-                    (1, [1]),
-                    (2, [2]),
-                    (128, [128, 1]),
-                    (-1, [255, 255, 255, 255, 255, 255, 255, 255, 255, 1])
+            Int32 => {
+                write: write_int32 => {
+                    0 => [0],
+                    1 => [1],
+                    127 => [127],
+                    128 => [128, 1],
+                    16383 => [255, 127],
+                    16384 => [128, 128, 1],
+                    -1 => [255, 255, 255, 255, 255, 255, 255, 255, 255, 1],
+                    i32::min_value() => [128, 128, 128, 128, 248, 255, 255, 255, 255, 1],
                 },
-                size = calculate_int32_sizes => {
-                    (0, Length::new(1)),
-                    (1, Length::new(1))
-                }
+                size: calculate_int32_size => {
+                    0                => Length::new(1),
+                    1                => Length::new(1),
+
+                    127              => Length::new(1),
+                    128              => Length::new(2),
+
+                    16383            => Length::new(2),
+                    16384            => Length::new(3),
+
+                    2097151          => Length::new(3),
+                    2097152          => Length::new(4),
+
+                    268435455        => Length::new(4),
+                    268435456        => Length::new(5),
+
+                    i32::max_value() => Length::new(5),
+
+                    -1               => Length::new(10),
+                    i32::min_value() => Length::new(10),
+                },
+                read: read_int32 => {
+                    [0] => Ok(0),
+                    [1] => Ok(1),
+                    [127] => Ok(127),
+                    [128, 1] => Ok(128),
+                    [128, 128, 1] => Ok(16384),
+                    [255, 255, 255, 255, 255, 255, 255, 255, 255, 1] => Ok(-1),
+                },
             }
         }
     }
     mod uint32 {
+        use crate::raw::Uint32;
 
+        test_cases! {
+            Uint32 => {
+                write: write_uint32 => {
+                    0 => [0],
+                    1 => [1],
+                    127 => [127],
+                    128 => [128, 1],
+                }
+            }
+        }
     }
     mod int64 {
 
@@ -591,7 +648,23 @@ mod test {
 
     }
     mod r#bool {
+        use crate::raw::Bool;
 
+        test_cases! {
+            Bool => {
+                write: write_bool => {
+                    false => [0],
+                    true  => [1],
+                },
+                read: read_bool => {
+                    [0] => Ok(false),
+                    [128, 128, 128, 128, 128, 128, 128, 128, 128, 0] => Ok(false),
+
+                    [1] => Ok(true),
+                    [128, 128, 128, 128, 128, 128, 128, 128, 128, 1] => Ok(true),
+                },
+            }
+        }
     }
     mod string {
 
