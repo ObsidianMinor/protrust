@@ -118,8 +118,27 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
     /// ```
     fn calculate_size(&self) -> Option<Length>;
     /// Writes this message's data to the [`CodedWriter`](io/write/struct.CodedWriter.html).
+    /// 
+    /// # Examples
+    /// 
+    /// ```ignore
+    /// # use protrust::doctest::timestamp::Timestamp;
+    /// use protrust::Message;
+    /// use protrust::io::CodedWriter;
+    /// 
+    /// let mut timestamp = Timestamp::new();
+    /// *timestamp.seconds_mut() = 5;
+    /// *timestamp.nanos_mut() = 100;
+    /// 
+    /// assert_eq!(timestamp.calculate_size(), Length::new(4));
+    /// 
+    /// let mut output = [0u8; 4];
+    /// let mut writer = CodedWriter::with_slice(&mut output);
+    /// 
+    /// timestamp.write_to(&mut writer).expect("size is calculated ahead of time");
+    /// ```
     fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result;
-    /// Returns whether the message value is initialized
+    /// Returns whether the message value is initialized.
     fn is_initialized(&self) -> bool;
 
     /// Gets a shared reference to the unknown fields in this message.
