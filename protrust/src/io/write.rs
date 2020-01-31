@@ -43,15 +43,15 @@ mod internal {
     impl BorrowedStream<'_> {
         #[inline]
         fn remaining(&self) -> usize {
-            usize::wrapping_sub(*self.current as _, self.end as _)
+            usize::wrapping_sub(self.end as _, *self.current as _)
         }
         #[inline]
         fn capacity(&self) -> usize {
-            usize::wrapping_sub(self.start as _, self.end as _)
+            usize::wrapping_sub(self.end as _, self.start as _)
         }
         #[inline]
         fn buffered(&self) -> usize {
-            usize::wrapping_sub(self.start as _, *self.current as _)
+            usize::wrapping_sub(*self.current as _, self.start as _)
         }
         #[inline]
         fn clear(&mut self) {
@@ -142,7 +142,7 @@ mod internal {
         #[inline]
         fn can_write(&self, len: usize) -> bool {
             match self.end {
-                Some(end) => usize::wrapping_sub(*self.current as _, end.as_ptr() as _) > len,
+                Some(end) => usize::wrapping_sub(end.as_ptr() as _, *self.current as _) >= len,
                 None => true
             }
         }
@@ -404,7 +404,7 @@ impl<'a> Slice<'a> {
         }
     }
     fn len(&self) -> usize {
-        usize::wrapping_sub(self.start as _, self.end as _)
+        usize::wrapping_sub(self.end as _, self.start as _)
     }
     fn into_inner(self) -> &'a mut [u8] {
         unsafe { slice::from_raw_parts_mut(self.start, self.len()) }
@@ -507,15 +507,15 @@ impl<T: Write> Stream<T> {
     }
     #[inline]
     fn remaining(&self) -> usize {
-        usize::wrapping_sub(self.current as _, self.end.as_ptr() as _)
+        usize::wrapping_sub(self.end.as_ptr() as _, self.current as _)
     }
     #[inline]
     fn capacity(&self) -> usize {
-        usize::wrapping_sub(self.start.as_ptr() as _, self.end.as_ptr() as _)
+        usize::wrapping_sub(self.end.as_ptr() as _, self.start.as_ptr() as _)
     }
     #[inline]
     fn buffered(&self) -> usize {
-        usize::wrapping_sub(self.start.as_ptr() as _, self.current as _)
+        usize::wrapping_sub(self.current as _, self.start.as_ptr() as _)
     }
     #[inline]
     fn clear(&mut self) {
@@ -753,38 +753,53 @@ mod test {
     }
 
     macro_rules! test {
-        ($(($ti:ident | $tia:ident) = |$f:ident| $t:block => $x:expr),+) => {
+        ($(($ti:ident | $tia:ident | size: $s:expr) = |$f:ident| $t:block => $p:pat $(if $pe:expr)?),+) => {
             $(
                 pub fn $ti<T>() where for<'a> T: WriterOutput<'a> {
-                    let expected = &$x;
-                    let mut output = alloc::vec![0; expected.len()].into_boxed_slice();
+                    let mut output = alloc::vec![0; $s].into_boxed_slice();
 
-                    let remaining = T::run(&mut output, |$f| $t).expect("test failed");
+                    let result = 
+                        match T::run(&mut output, |$f| $t) {
+                            Ok(r) => {
+                                let remaining_len = r.len();
+                                Ok(output.split_at(output.len() - remaining_len))
+                            },
+                            Err(e) => Err(e),
+                        };
 
-                    assert!(remaining.is_empty());
-                    assert_eq!(expected, output.as_ref());
+                    assert!(matches!(result, $p $(if $pe)?), "expected {}, got {:?}", stringify!($p $(if $pe)?), result);
                 }
 
                 pub fn $tia<T>() where for<'a> T: WriterOutput<'a> {
-                    let expected = &$x;
-                    let mut output = alloc::vec![0; expected.len()].into_boxed_slice();
+                    let mut output = alloc::vec![0; $s].into_boxed_slice();
 
-                    let remaining = T::run_any(&mut output, |$f| $t).expect("test failed");
+                    let result = 
+                        match T::run_any(&mut output, |$f| $t) {
+                            Ok(r) => {
+                                let remaining_len = r.len();
+                                Ok(output.split_at(output.len() - remaining_len))
+                            },
+                            Err(e) => Err(e),
+                        };
 
-                    assert!(remaining.is_empty());
-                    assert_eq!(expected, output.as_ref());
+                    assert!(matches!(result, $p $(if $pe)?), "expected {}, got {:?}", stringify!($p $(if $pe)?), result);
                 }
             )+
         };
     }
 
     test! {
-        (write_tag | write_tag_any) = |w| {
-            use crate::io::Tag;
-            use core::convert::TryFrom;
+        (write_varint32_zero | write_varint32_zero_any | size: 1) = |w| {
+            w.write_varint32(0)
+        } => Ok(([0], [])),
 
-            w.write_tag(Tag::try_from(8).unwrap())
-        } => [8]
+        (write_varint32_2byte | write_varint32_2byte_any | size: 2) = |w| {
+            w.write_varint32(128)
+        } => Ok(([128, 1], [])),
+
+        (write_varint32_3byte | write_varint32_3byte_any | size: 3) = |w| {
+            w.write_varint32(16384)
+        } => Ok(([128, 128, 1], []))
     }
 
     macro_rules! run {
@@ -806,7 +821,9 @@ mod test {
         ($f:ty) => {
             run! {
                 $f => {
-                    write_tag, write_tag_any
+                    write_varint32_zero, write_varint32_zero_any,
+                    write_varint32_2byte, write_varint32_2byte_any,
+                    write_varint32_3byte, write_varint32_3byte_any
                 }
             }
         };
