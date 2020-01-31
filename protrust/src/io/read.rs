@@ -1361,6 +1361,7 @@ impl Builder {
 /// 
 /// This structure defers tag checking, making it faster to read fields when matching
 /// on an existing field tag value.
+#[must_use]
 pub struct FieldReader<'a, T: Input + 'a> {
     inner: &'a mut CodedReader<T>,
     tag: u32,
@@ -1392,6 +1393,7 @@ impl<'a, T: Input + 'a> FieldReader<'a, T> {
 }
 
 /// Represents a length delimited value that can be read in a specified format.
+#[must_use]
 pub struct Limit<'a, T: Input + 'a> {
     inner: &'a mut CodedReader<T>,
     old: Option<i32>,
