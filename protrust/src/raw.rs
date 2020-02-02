@@ -455,7 +455,7 @@ impl<T: TraitMessage> Value for Message<T> {
     }
     default fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
         input.recurse(|input| {
-            let mut t = T::new();
+            let mut t = T::default();
             t.merge_from(input)?;
             Ok(t)
         })
@@ -463,7 +463,7 @@ impl<T: TraitMessage> Value for Message<T> {
 }
 impl<T: TraitMessage + ExtendableMessage + 'static> Value for Message<T> {
     fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
-        let mut t = T::new();
+        let mut t = T::default();
         t.extensions_mut().replace_registry(input.registry());
         t.merge_from(input)?;
         Ok(t)
@@ -492,7 +492,7 @@ impl<T: TraitMessage> Value for Group<T> {
         this.is_initialized()
     }
     fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
-        let mut t = T::new();
+        let mut t = T::default();
         t.merge_from(input)?;
         Ok(t)
     }

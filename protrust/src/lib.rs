@@ -191,20 +191,6 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
     /// assert!(unknown_fields.is_empty());
     /// ```
     fn unknown_fields_mut(&mut self) -> &mut UnknownFieldSet;
-
-    /// Creates a new instance of the message with all fields set to their default state.
-    /// 
-    /// # Examples
-    /// 
-    /// ```ignore
-    /// # use protrust::doctest::timestamp::Timestamp;
-    /// use protrust::Message;
-    /// 
-    /// let timestamp = Timestamp::new();
-    /// ```
-    fn new() -> Self {
-        Default::default()
-    }
 }
 
 /// A marker trait used to mark enum types in generated code.
