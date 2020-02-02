@@ -442,7 +442,7 @@ impl<T: TraitMessage> Value for Message<T> {
             .add_bytes(len)
     }
     fn merge_from<U: Input>(this: &mut Self::Inner, input: &mut CodedReader<U>) -> read::Result<()> {
-        input.read_limit()?.then(|input| this.merge_from(input))
+        input.read_limit()?.then(|input| input.recurse(|input| this.merge_from(input)))
     }
     fn write_to<U: Output>(this: &Self::Inner, output: &mut CodedWriter<U>) -> write::Result {
         let length = this.calculate_size().ok_or(io::write::Error::ValueTooLarge)?;
@@ -454,9 +454,11 @@ impl<T: TraitMessage> Value for Message<T> {
         this.is_initialized()
     }
     default fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
-        let mut t = T::new();
-        t.merge_from(input)?;
-        Ok(t)
+        input.recurse(|input| {
+            let mut t = T::new();
+            t.merge_from(input)?;
+            Ok(t)
+        })
     }
 }
 impl<T: TraitMessage + ExtendableMessage + 'static> Value for Message<T> {
@@ -481,7 +483,7 @@ impl<T: TraitMessage> Value for Group<T> {
         builder.add_bytes(this.calculate_size()?)
     }
     fn merge_from<U: Input>(this: &mut Self::Inner, input: &mut CodedReader<U>) -> read::Result<()> {
-        this.merge_from(input)
+        input.recurse(|input| this.merge_from(input))
     }
     fn write_to<U: Output>(this: &Self::Inner, output: &mut CodedWriter<U>) -> write::Result {
         this.write_to(output)

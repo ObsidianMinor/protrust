@@ -583,7 +583,8 @@ pub enum Error {
     NegativeSize,
     /// The input attempted to recurse too deep into a nested structure
     RecursionLimitExceeded,
-    /// The input contained an invalid tag (zero or the tag had an invalid wire format)
+    /// The input contained an invalid tag (zero or the tag had an invalid wire format) or
+    /// the tag was invalid in it's position
     InvalidTag(u32),
     /// An error occured while reading from the underlying `Read` object
     StreamError(stream::Error),
@@ -1566,6 +1567,7 @@ impl<T: Input> CodedReader<T> {
     }
 
     /// Performs an operation, incrementing the recursion count beforehand.
+    #[inline]
     pub fn recurse<R, F: FnOnce(&mut Self) -> Result<R>>(&mut self, f: F) -> Result<R> {
         struct Guard<'a, T: Input + 'a> {
             inner: &'a mut CodedReader<T>,
