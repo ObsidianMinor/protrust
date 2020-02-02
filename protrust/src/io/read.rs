@@ -16,12 +16,18 @@ use crate::raw::{self, Value};
 use std::error;
 
 mod internal {
-    use core::cmp::Ordering;
+    use core::cmp::{self, Ordering};
     use core::convert::TryFrom;
     use core::ops::Range;
     use core::ptr::{self, NonNull};
     use core::result;
     use crate::io::{ByteString, Tag, Length, internal::Array, stream::{self, Read}, read::{Result, Error}};
+
+    /// State shared between all readers. This is borrowed by Any to manage state of a specialized reader
+    pub struct SharedState {
+        pub recursion_depth: usize,
+        pub last_tag: Option<Tag>,
+    }
 
     /// A container for shared buffer manipulation logic.
     /// This does not track the lifetime of the buffer,
@@ -149,8 +155,8 @@ mod internal {
     }
 
     pub trait Reader {
-        fn last_tag(&self) -> Option<Tag>;
-        fn last_tag_mut(&mut self) -> &mut Option<Tag>;
+        fn state(&self) -> &SharedState;
+        fn state_mut(&mut self) -> &mut SharedState;
 
         fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>>;
         fn pop_limit(&mut self, old: Option<i32>);
@@ -186,7 +192,7 @@ mod internal {
     pub struct Any<'a> {
         pub(super) stream: Option<BorrowedStream<'a>>,
         pub(super) buffer: &'a mut Buffer,
-        pub(super) last_tag: &'a mut Option<Tag>,
+        pub(super) shared_state: &'a mut SharedState,
     }
 
     impl Any<'_> {
@@ -198,30 +204,30 @@ mod internal {
             }
 
             let limit_len = self.buffer.to_limit_len();
-            let buffer_has_all = 
-                self.stream
-                    .as_ref()
-                    .map_or(true,
-                        |BorrowedStream { remaining_limit, .. }| **remaining_limit <= 0);
-            if buffer_has_all {
-                if limit_len < slice.len() {
-                    unsafe { self.buffer.advance(limit_len); }
-                    return Err(stream::Error.into());
-                }
+            match self.stream.as_ref() {
+                Some(BorrowedStream { remaining_limit: &mut 0, .. }) | None => {
+                    if limit_len < slice.len() {
+                        unsafe { self.buffer.advance(limit_len); }
+                        return Err(stream::Error.into());
+                    }
+    
+                    unsafe {
+                        self.buffer.copy_nonoverlapping(slice);
+                    }
+    
+                    Ok(&mut [])
+                },
+                Some(_) => {
+                    let (f, s) = slice.split_at_mut(cmp::min(limit_len, slice.len()));
 
-                unsafe {
-                    self.buffer.copy_nonoverlapping(slice);
-                }
+                    if !f.is_empty() {
+                        unsafe {
+                            self.buffer.copy_nonoverlapping(f);
+                        }
+                    }
 
-                Ok(&mut [])
-            } else {
-                let (f, s) = slice.split_at_mut(limit_len);
-
-                unsafe {
-                    self.buffer.copy_nonoverlapping(f);
-                }
-
-                Ok(s)
+                    Ok(s)
+                },
             }
         }
         fn read_direct(BorrowedStream { input: stream, remaining_limit: limit, .. }: &mut BorrowedStream, buf: &mut [u8]) -> Result<()> {
@@ -303,7 +309,6 @@ mod internal {
             }
 
             let mut remaining_slice = self.read_buffer_partial(slice)?;
-
             if !remaining_slice.is_empty() {
                 match &mut self.stream {
                     // if the remaining amnt to read is more than or equal to
@@ -315,7 +320,7 @@ mod internal {
                     Some(_) => {
                         loop {
                             self.refresh()?;
-                            remaining_slice = self.read_buffer_partial(slice)?;
+                            remaining_slice = self.read_buffer_partial(remaining_slice)?;
 
                             if remaining_slice.is_empty() {
                                 break Ok(());
@@ -367,29 +372,19 @@ mod internal {
     }
 
     impl<'a> Reader for Any<'a> {
-        fn last_tag(&self) -> Option<Tag> {
-            *self.last_tag
+        fn state(&self) -> &SharedState {
+            &self.shared_state
         }
-        fn last_tag_mut(&mut self) -> &mut Option<Tag> {
-            self.last_tag
+        fn state_mut(&mut self) -> &mut SharedState {
+            self.shared_state
         }
 
         fn push_limit(&mut self, limit: i32) -> result::Result<Option<i32>, stream::Error> {
             match &mut self.stream {
                 Some(BorrowedStream { remaining_limit, .. }) => {
                     if **remaining_limit < 0 {
-                        let limit_len = self.buffer.to_limit_len();
-                        if let Ok(end) = i32::try_from(limit_len) {
-                            if limit > end {
-                                Err(stream::Error.into())
-                            } else {
-                                **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
-                                Ok(None)
-                            }
-                        } else {
-                            **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
-                            Ok(None)
-                        }
+                        **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
+                        Ok(None)
                     } else {
                         Ok(Some(0))
                     }
@@ -406,16 +401,14 @@ mod internal {
                     } else {
                         let limit_len = self.buffer.to_limit_len();
                         unsafe {
-                            if let Ok(end) = i32::try_from(limit_len) {
-                                if limit > end {
+                            match i32::try_from(limit_len) {
+                                Ok(end) if limit > end => {
                                     Err(stream::Error.into())
-                                } else {
+                                },
+                                _ => {
                                     self.buffer.apply_limit(limit);
                                     Ok(None)
                                 }
-                            } else {
-                                self.buffer.apply_limit(limit);
-                                Ok(None)
                             }
                         }
                     }
@@ -561,7 +554,7 @@ mod internal {
                         .map(|BorrowedStream { input, buf, remaining_limit, reached_eof }|
                               BorrowedStream { input: *input, buf, remaining_limit, reached_eof }),
                 buffer: &mut self.buffer,
-                last_tag: &mut self.last_tag
+                shared_state: &mut self.shared_state
             }
         }
 
@@ -575,44 +568,9 @@ mod internal {
 
     unsafe impl Send for Any<'_> { }
     unsafe impl Sync for Any<'_> { }
-
-    #[cfg(test)]
-    mod test {
-        use super::Buffer;
-
-        #[test]
-        fn buffer_from_slice() {
-            let input = [1, 2, 3];
-            let buffer = Buffer::from_slice(&input);
-
-            assert_eq!(buffer.to_limit_len(), 3);
-            assert_eq!(buffer.to_end_len(), 3);
-            assert_eq!(unsafe { buffer.to_limit_as_slice() }, &input);
-        }
-
-        #[test]
-        fn buffer_next_byte() {
-            let input = [1, 2, 3];
-            let mut buffer = Buffer::from_slice(&input);
-
-            let b1 = unsafe { buffer.next_byte() };
-
-            assert_eq!(b1, input[0]);
-            assert_eq!(buffer.to_limit_len(), 2);
-            assert_eq!(buffer.to_end_len(), 2);
-            assert_eq!(unsafe { buffer.to_limit_as_slice() }, &input[1..]);
-            
-            let b2 = unsafe { buffer.peek_byte() };
-
-            assert_eq!(b2, input[1]);
-            assert_eq!(buffer.to_limit_len(), 2);
-            assert_eq!(buffer.to_end_len(), 2);
-            assert_eq!(unsafe { buffer.to_limit_as_slice() }, &input[1..]);
-        }
-    }
 }
 
-use internal::{Reader, Buffer};
+use internal::{Reader, Buffer, SharedState};
 
 pub use internal::Any;
 
@@ -623,6 +581,8 @@ pub enum Error {
     MalformedVarint,
     /// The input contained a length delimited value which reported it had a negative size
     NegativeSize,
+    /// The input attempted to recurse too deep into a nested structure
+    RecursionLimitExceeded,
     /// The input contained an invalid tag (zero or the tag had an invalid wire format)
     InvalidTag(u32),
     /// An error occured while reading from the underlying `Read` object
@@ -648,6 +608,7 @@ impl Display for Error {
         match self {
             Error::MalformedVarint => write!(fmt, "the input contained an invalid variable length integer"),
             Error::NegativeSize => write!(fmt, "the input contained a length delimited value which reported it had a negative size"),
+            Error::RecursionLimitExceeded => write!(fmt, "the input contained a nested data structure that exceeded the recursion limit"),
             Error::InvalidTag(val) => write!(fmt, "the input contained an tag that was either invalid or was unexpected at this point in the input: {}", val),
             Error::StreamError(_) => write!(fmt, "an error occured in the underlying input"),
             Error::InvalidString(_) => write!(fmt, "the input contained an invalid UTF8 string")
@@ -681,7 +642,7 @@ impl<T: internal::Reader> Input for T { }
 pub struct Slice<'a> {
     a: PhantomData<&'a [u8]>,
     buffer: Buffer,
-    last_tag: Option<Tag>,
+    state: internal::SharedState,
 }
 
 impl<'a> Slice<'a> {
@@ -689,17 +650,20 @@ impl<'a> Slice<'a> {
         Self {
             a: PhantomData,
             buffer: Buffer::from_slice(value),
-            last_tag: None
+            state: internal::SharedState {
+                recursion_depth: 0,
+                last_tag: None,
+            }
         }
     }
 }
 
 impl Reader for Slice<'_> {
-    fn last_tag(&self) -> Option<Tag> {
-        self.last_tag
+    fn state(&self) -> &SharedState {
+        &self.state
     }
-    fn last_tag_mut(&mut self) -> &mut Option<Tag> {
-        &mut self.last_tag
+    fn state_mut(&mut self) -> &mut SharedState {
+        &mut self.state
     }
 
     fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>> {
@@ -712,7 +676,7 @@ impl Reader for Slice<'_> {
                 Some(remaining - limit)
             },
             None => {
-                if self.buffer.to_end_len() <= limit as usize {
+                if self.buffer.to_end_len() < limit as usize {
                     return Err(stream::Error);
                 }
 
@@ -907,7 +871,7 @@ impl Reader for Slice<'_> {
         Any {
             stream: None,
             buffer: &mut self.buffer,
-            last_tag: &mut self.last_tag
+            shared_state: &mut self.state
         }
     }
 
@@ -928,7 +892,7 @@ pub struct Stream<T> {
     buffer: Buffer,
     remaining_limit: i32,
     reached_eof: bool,
-    last_tag: Option<Tag>,
+    state: SharedState,
 }
 
 impl<T: Read> Stream<T> {
@@ -942,7 +906,10 @@ impl<T: Read> Stream<T> {
             buffer,
             remaining_limit: -1,
             reached_eof: false,
-            last_tag: None
+            state: SharedState {
+                recursion_depth: 0,
+                last_tag: None,
+            }
         }
     }
     fn into_inner(self) -> T {
@@ -1029,7 +996,7 @@ impl<T: Read> Stream<T> {
             } else {
                 loop {
                     self.refresh()?;
-                    remaining_slice = self.read_buffer_partial(slice)?;
+                    remaining_slice = self.read_buffer_partial(remaining_slice)?;
 
                     if remaining_slice.is_empty() {
                         break;
@@ -1110,11 +1077,11 @@ impl<T: Read> Stream<T> {
 }
 
 impl<T: Read> Reader for Stream<T> {
-    fn last_tag(&self) -> Option<Tag> {
-        self.last_tag
+    fn state(&self) -> &SharedState {
+        &self.state
     }
-    fn last_tag_mut(&mut self) -> &mut Option<Tag> {
-        &mut self.last_tag
+    fn state_mut(&mut self) -> &mut SharedState {
+        &mut self.state
     }
 
     fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>> {
@@ -1256,12 +1223,12 @@ impl<T: Read> Reader for Stream<T> {
                 reached_eof: &mut self.reached_eof,
             }),
             buffer: &mut self.buffer,
-            last_tag: &mut self.last_tag
+            shared_state: &mut self.state
         }
     }
 
     fn reached_end(&self) -> bool {
-        self.reached_eof && self.buffer.reached_end()
+        self.buffer.reached_end() && self.reached_eof
     }
 }
 
@@ -1272,13 +1239,15 @@ unsafe impl<T: Sync> Sync for Stream<T> { }
 struct ReaderOptions {
     unknown_fields: UnknownFieldHandling,
     registry: Option<&'static ExtensionRegistry>,
+    recursion_limit: usize,
 }
 
 impl Default for ReaderOptions {
     fn default() -> Self {
         ReaderOptions {
             unknown_fields: UnknownFieldHandling::Store,
-            registry: None
+            registry: None,
+            recursion_limit: 100,
         }
     }
 }
@@ -1313,21 +1282,27 @@ impl UnknownFieldHandling {
 }
 
 impl Builder {
-    /// Creates a new builder with the default configuration
+    /// Creates a new builder with the default configuration.
     #[inline]
     pub fn new() -> Self {
         Default::default()
     }
-    /// Sets unknown field handling for the reader
+    /// Sets unknown field handling for the reader. The default handling stores unknown fields.
     #[inline]
     pub fn unknown_fields(mut self, value: UnknownFieldHandling) -> Self {
         self.options.unknown_fields = value;
         self
     }
-    /// Sets the registry extendable messages should use when being created
+    /// Sets the registry extendable messages should use when being created. No registry is used by default.
     #[inline]
     pub fn registry(mut self, registry: Option<&'static ExtensionRegistry>) -> Self {
         self.options.registry = registry;
+        self
+    }
+    /// Sets the recursion limit for a reader. The default limit is 100.
+    #[inline]
+    pub fn recursion_limit(mut self, limit: usize) -> Self {
+        self.options.recursion_limit = limit;
         self
     }
     /// Constructs a [`CodedReader`](struct.CodedReader.html) using this builder and 
@@ -1360,7 +1335,7 @@ impl Builder {
 /// wire type and field number checking.
 /// 
 /// This structure defers tag checking, making it faster to read fields when matching
-/// on an existing field tag value.
+/// on an existing raw field tag value.
 #[must_use]
 pub struct FieldReader<'a, T: Input + 'a> {
     inner: &'a mut CodedReader<T>,
@@ -1375,7 +1350,7 @@ impl<'a, T: Input + 'a> FieldReader<'a, T> {
     }
     /// Reads the field value using the specified function, passing the checked tag value to set as the last tag
     #[inline]
-    pub fn read_value<F: FnOnce(&mut CodedReader<T>) -> Result<()>>(self, tag: Tag, f: F) -> Result<()> {
+    pub fn read_value<R, F: FnOnce(&mut CodedReader<T>) -> Result<R>>(self, tag: Tag, f: F) -> Result<R> {
         debug_assert_eq!(self.tag, tag.get(), "Provided tag does not match read tag value");
         self.inner.set_last_tag(Some(tag));
 
@@ -1384,7 +1359,7 @@ impl<'a, T: Input + 'a> FieldReader<'a, T> {
 
     /// Reads the field value using the specified function, checking the tag before running the function.
     #[inline]
-    pub fn check_and_read_value<F: FnOnce(&mut CodedReader<T>) -> Result<()>>(self, f: F) -> Result<()> {
+    pub fn check_and_read_value<R, F: FnOnce(&mut CodedReader<T>) -> Result<R>>(self, f: F) -> Result<R> {
         let tag = Tag::try_from(self.tag).map_err(|_| Error::InvalidTag(self.tag))?;
         self.inner.set_last_tag(Some(tag));
 
@@ -1401,8 +1376,10 @@ pub struct Limit<'a, T: Input + 'a> {
 
 impl<'a, T: Input + 'a> Limit<'a, T> {
     /// Reads a length delimited value using the specified function.
-    pub fn then<F: FnOnce(&mut CodedReader<T>) -> Result<()>>(self, f: F) -> Result<()> {
-        f(self.inner)
+    pub fn then<R, F: FnOnce(&mut CodedReader<T>) -> Result<R>>(self, f: F) -> Result<R> {
+        let result = f(self.inner)?;
+        debug_assert!(self.inner.reached_limit());
+        Ok(result)
     }
 
     /// Reads multiple values in a length delimited value using the specified function.
@@ -1470,6 +1447,19 @@ impl<'a> CodedReader<Slice<'a>> {
 }
 
 impl<T: Input> CodedReader<T> {
+    fn increment_recursion_count(&mut self) -> Result<()> {
+        let state = self.inner.state_mut();
+        if state.recursion_depth == self.options.recursion_limit {
+            Err(Error::RecursionLimitExceeded)
+        } else {
+            state.recursion_depth += 1;
+            Ok(())
+        }
+    }
+    fn decrement_recursion_count(&mut self) {
+        self.inner.state_mut().recursion_depth -= 1;
+    }
+
     /// Gets handling options for unknown fields read with this reader.
     pub fn unknown_field_handling(&self) -> UnknownFieldHandling {
         self.options.unknown_fields
@@ -1481,12 +1471,12 @@ impl<T: Input> CodedReader<T> {
     }
     /// Gets the last tag read by the reader.
     pub fn last_tag(&self) -> Option<Tag> {
-        self.inner.last_tag()
+        self.inner.state().last_tag
     }
     fn set_last_tag(&mut self, tag: Option<Tag>) {
-        *self.inner.last_tag_mut() = tag;
+        self.inner.state_mut().last_tag = tag;
     }
-    /// Returns an [`AnyConverter`] that can be used to temporarily 
+    /// Returns a new CodedReader that can be used to temporarily 
     /// convert the reader into a non-generic reader over [`Any`] input.
     pub fn as_any(&mut self) -> CodedReader<Any> {
         CodedReader {
@@ -1555,14 +1545,17 @@ impl<T: Input> CodedReader<T> {
                 WireType::Bit64 => self.inner.skip_bit64()?,
                 WireType::LengthDelimited => self.inner.skip_length_delimited()?,
                 WireType::StartGroup => {
-                    let end = Tag::new(last_tag.field(), WireType::EndGroup);
-                    loop {
-                        match self.read_tag()? {
-                            Some(tag) if tag == end => break,
-                            Some(_) => self.skip()?,
-                            None => return Err(Error::StreamError(stream::Error))
+                    self.recurse(|s| {
+                        let end = Tag::new(last_tag.field(), WireType::EndGroup);
+                        loop {
+                            match s.read_tag()? {
+                                Some(tag) if tag == end => break Ok(()),
+                                Some(tag) if tag.wire_type() == WireType::EndGroup => return Err(Error::InvalidTag(tag.get())),
+                                Some(_) => s.skip()?,
+                                None => return Err(Error::StreamError(stream::Error))
+                            }
                         }
-                    }
+                    })?
                 },
                 WireType::EndGroup => { },
                 WireType::Bit32 => self.inner.skip_bit32()?,
@@ -1570,6 +1563,26 @@ impl<T: Input> CodedReader<T> {
         }
 
         Ok(())
+    }
+
+    /// Performs an operation, incrementing the recursion count beforehand.
+    pub fn recurse<R, F: FnOnce(&mut Self) -> Result<R>>(&mut self, f: F) -> Result<R> {
+        struct Guard<'a, T: Input + 'a> {
+            inner: &'a mut CodedReader<T>,
+        }
+        impl<'a, T: Input + 'a> Drop for Guard<'a, T> {
+            fn drop(&mut self) {
+                self.inner.decrement_recursion_count();
+            }
+        }
+
+        self.increment_recursion_count()?;
+
+        let guard = Guard { inner: self };
+        let result = f(guard.inner)?;
+        drop(guard);
+
+        Ok(result)
     }
 
     /// Reads a field value. This offloads checking of the tag's value, making it faster when reading
@@ -1639,7 +1652,7 @@ mod test {
     mod actions {
         use core::fmt::Debug;
         use core::marker::PhantomData;
-        use crate::io::{Tag, stream, read::{self, Input, CodedReader, Error}};
+        use crate::io::{Tag, ByteString, stream, read::{self, Input, CodedReader, Error}};
 
         pub trait Action<T: Input> {
             fn run(self, reader: &mut CodedReader<T>);
@@ -1708,6 +1721,8 @@ mod test {
         pub fn read_varint64<T: Input>(r: &mut CodedReader<T>) -> read::Result<u64> { r.read_varint64() }
         pub fn read_bit32<T: Input>(r: &mut CodedReader<T>) -> read::Result<u32> { r.read_bit32() }
         pub fn read_bit64<T: Input>(r: &mut CodedReader<T>) -> read::Result<u64> { r.read_bit64() }
+        pub fn read_length_delimited<B: ByteString, T: Input>(r: &mut CodedReader<T>) -> read::Result<B> { r.read_length_delimited() }
+        pub fn skip<T: Input>(r: &mut CodedReader<T>) -> read::Result<()> { r.skip() }
 
         /// An assertion action that asserts some thing about a provided value
         pub trait AssertAction<V>: Sized {
@@ -1728,6 +1743,9 @@ mod test {
         }
         pub fn malformed_varint<T: Debug>(r: Result<T, Error>) {
             assert!(matches!(r, Err(Error::MalformedVarint)), "expected `{:?}`, got `{:?}`", Err::<T, _>(Error::MalformedVarint), r)
+        }
+        pub fn invalid_tag<T: Debug>(tag: u32) -> impl FnOnce(Result<T, Error>) {
+            move |r| assert!(matches!(r, Err(Error::InvalidTag(t)) if t == tag))
         }
     }
 
@@ -1842,6 +1860,100 @@ mod test {
         (read_bit64 | read_bit64_any) = [0xEF, 0xCD, 0xAB, 0x90, 0x78, 0x56, 0x34, 0x12] => |r| {
             r.then(a::read_bit64.with(a::value(0x1234567890ABCDEFu64)))
              .then(a::read_tag::none());
+        },
+        (read_length_delimited | read_length_delimited_any) = 
+            [12, b'H', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l', b'd', b'!'] 
+                => |r| {
+            use alloc::borrow::ToOwned;
+
+            r.then(a::read_length_delimited::<alloc::vec::Vec<u8>, _>
+                .with(a::value(b"Hello world!".as_ref().to_owned())))
+             .then(a::read_tag::none());
+        },
+        (read_length_delimited_truncated | read_length_delimited_truncated_any) = [12] => |r| {
+            r.then(a::read_length_delimited::<alloc::vec::Vec<u8>, _>.with(a::stream_error));
+        },
+        (read_length_delimited_byte_truncated | read_length_delimited_byte_truncated_any) =
+            [12, b'H', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l', b'd']
+                => |r| {
+            r.then(a::read_length_delimited::<alloc::vec::Vec<u8>, _>.with(a::stream_error));
+        },
+        (skip_varint | skip_varint_any) = [8, 128, 128, 128, 128, 128, 128, 128, 128, 128, 0] => |r| {
+            r.then(a::read_tag::value(8))
+             .then(a::skip.with(a::value(())))
+             .then(a::read_tag::none());
+        },
+        (skip_varint_truncated | skip_varint_truncated_any) = [8] => |r| {
+            r.then(a::read_tag::value(8))
+             .then(a::skip.with(a::stream_error));
+        },
+        (skip_varint_9byte_truncated | skip_varint_9byte_truncated_any) = [8, 128, 128, 128, 128, 128, 128, 128, 128, 128] => |r| {
+            r.then(a::read_tag::value(8))
+             .then(a::skip.with(a::stream_error));
+        },
+        (skip_varint_malformed | skip_varint_malformed_any) = [8, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128] => |r| {
+            r.then(a::read_tag::value(8))
+             .then(a::skip.with(a::malformed_varint));
+        },
+        (skip_bit32 | skip_bit32_any) = [13, 0, 0, 0, 0] => |r| {
+            r.then(a::read_tag::value(13))
+             .then(a::skip.with(a::value(())))
+             .then(a::read_tag::none());
+        },
+        (skip_bit32_truncated | skip_bit32_truncated_any) = [13] => |r| {
+            r.then(a::read_tag::value(13))
+             .then(a::skip.with(a::stream_error));
+        },
+        (skip_bit32_3byte_truncated | skip_bit32_3byte_truncated_any) = [13, 0, 0, 0] => |r| {
+            r.then(a::read_tag::value(13))
+             .then(a::skip.with(a::stream_error));
+        },
+        (skip_bit64 | skip_bit64_any) = [9, 0, 0, 0, 0, 0, 0, 0, 0] => |r| {
+            r.then(a::read_tag::value(9))
+             .then(a::skip.with(a::value(())))
+             .then(a::read_tag::none());
+        },
+        (skip_bit64_truncated | skip_bit64_truncated_any) = [9] => |r| {
+            r.then(a::read_tag::value(9))
+             .then(a::skip.with(a::stream_error));
+        },
+        (skip_bit64_7byte_truncated | skip_bit64_7byte_truncated_any) = [9, 0, 0, 0, 0, 0, 0, 0] => |r| {
+            r.then(a::read_tag::value(9))
+             .then(a::skip.with(a::stream_error));
+        },
+        (skip_length_delimited | skip_length_delimited_any) = [10, 2, 0, 0] => |r| {
+            r.then(a::read_tag::value(10))
+             .then(a::skip.with(a::value(())));
+        },
+        (skip_length_delimited_truncated | skip_length_delimited_truncated_any) = [10, 2] => |r| {
+            r.then(a::read_tag::value(10))
+             .then(a::skip.with(a::stream_error));
+        },
+        (skip_length_delimited_truncated_byte | skip_length_delimited_truncated_byte_any) = [10, 2, 0] => |r| {
+            r.then(a::read_tag::value(10))
+             .then(a::skip.with(a::stream_error));
+        },
+        (skip_group | skip_group_any) = [11, 16, 0, 12] => |r| {
+            r.then(a::read_tag::value(11))
+             .then(a::skip.with(a::value(())))
+             .then(a::read_tag::none());
+        },
+        // throw an end tag for field 2 in the middle of the field 1 group
+        (skip_group_other_field_end | skip_group_other_field_end_any) = [11, 20, 12] => |r| {
+            r.then(a::read_tag::value(11))
+             .then(a::skip.with(a::invalid_tag(20)));
+        },
+        (read_delimited_varint_field | read_delimited_varint_field_any) = [10, 2, 10, 1] => |r| {
+            r.then(a::read_tag::value(10))
+             .then((|r: &mut CodedReader<_>| {
+                r.read_limit()?.then(|r| {
+                    r.then(a::read_tag::value(10))
+                     .then(a::read_varint32.with(a::value(1)))
+                     .then(a::read_tag::none());
+                    Ok(())
+                })
+             }).with(a::value(())))
+             .then(a::read_tag::none());
         }
     }
 
@@ -1889,7 +2001,26 @@ mod test {
                     read_bit32, read_bit32_any,
                     read_truncated_bit64, read_truncated_bit64_any,
                     read_truncated_bit64_7byte, read_truncated_bit64_7byte_any,
-                    read_bit64, read_bit64_any
+                    read_bit64, read_bit64_any,
+                    read_length_delimited, read_length_delimited_any,
+                    read_length_delimited_truncated, read_length_delimited_truncated_any,
+                    read_length_delimited_byte_truncated, read_length_delimited_byte_truncated_any,
+                    skip_varint, skip_varint_any,
+                    skip_varint_truncated, skip_varint_truncated_any,
+                    skip_varint_9byte_truncated, skip_varint_9byte_truncated_any,
+                    skip_varint_malformed, skip_varint_malformed_any,
+                    skip_bit32, skip_bit32_any,
+                    skip_bit32_truncated, skip_bit32_truncated_any,
+                    skip_bit32_3byte_truncated, skip_bit32_3byte_truncated_any,
+                    skip_bit64, skip_bit64_any,
+                    skip_bit64_truncated, skip_bit64_truncated_any,
+                    skip_bit64_7byte_truncated, skip_bit64_7byte_truncated_any,
+                    skip_length_delimited, skip_length_delimited_any,
+                    skip_length_delimited_truncated, skip_length_delimited_truncated_any,
+                    skip_length_delimited_truncated_byte, skip_length_delimited_truncated_byte_any,
+                    skip_group, skip_group_any,
+                    skip_group_other_field_end, skip_group_other_field_end_any,
+                    read_delimited_varint_field, read_delimited_varint_field_any
                 }
             }
         };
