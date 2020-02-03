@@ -386,15 +386,21 @@ mod internal {
                         **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
                         Ok(None)
                     } else {
-                        Ok(Some(0))
+                        let remaining = i32::wrapping_add(self.buffer.to_limit_len() as i32, **remaining_limit);
+                        if remaining < limit {
+                            Err(stream::Error.into())
+                        } else {
+                            **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
+                            Ok(Some(i32::wrapping_sub(remaining, limit)))
+                        }
                     }
                 },
                 None => {
                     if let Some(existing_limit) = self.buffer.remaining_limit() {
-                        if limit > existing_limit {
+                        if existing_limit < limit {
                             Err(stream::Error.into())
                         } else {
-                            let old = existing_limit - limit;
+                            let old = i32::wrapping_sub(existing_limit, limit);
                             unsafe { self.buffer.apply_limit(limit) };
                             Ok(Some(old))
                         }
@@ -1460,6 +1466,9 @@ impl<T: Input> CodedReader<T> {
     fn decrement_recursion_count(&mut self) {
         self.inner.state_mut().recursion_depth -= 1;
     }
+    fn set_last_tag(&mut self, tag: Option<Tag>) {
+        self.inner.state_mut().last_tag = tag;
+    }
 
     /// Gets handling options for unknown fields read with this reader.
     pub fn unknown_field_handling(&self) -> UnknownFieldHandling {
@@ -1473,9 +1482,6 @@ impl<T: Input> CodedReader<T> {
     /// Gets the last tag read by the reader.
     pub fn last_tag(&self) -> Option<Tag> {
         self.inner.state().last_tag
-    }
-    fn set_last_tag(&mut self, tag: Option<Tag>) {
-        self.inner.state_mut().last_tag = tag;
     }
     /// Returns a new CodedReader that can be used to temporarily 
     /// convert the reader into a non-generic reader over [`Any`] input.
@@ -1725,6 +1731,9 @@ mod test {
         pub fn read_bit64<T: Input>(r: &mut CodedReader<T>) -> read::Result<u64> { r.read_bit64() }
         pub fn read_length_delimited<B: ByteString, T: Input>(r: &mut CodedReader<T>) -> read::Result<B> { r.read_length_delimited() }
         pub fn skip<T: Input>(r: &mut CodedReader<T>) -> read::Result<()> { r.skip() }
+        pub fn read_limited<T: Input, R, F: FnOnce(&mut CodedReader<T>) -> read::Result<R>>(f: F) -> impl FnOnce(&mut CodedReader<T>) -> read::Result<R> {
+            move |r| r.read_limit()?.then(f)
+        }
 
         /// An assertion action that asserts some thing about a provided value
         pub trait AssertAction<V>: Sized {
@@ -1748,6 +1757,9 @@ mod test {
         }
         pub fn invalid_tag<T: Debug>(tag: u32) -> impl FnOnce(Result<T, Error>) {
             move |r| assert!(matches!(r, Err(Error::InvalidTag(t)) if t == tag))
+        }
+        pub fn negative_size<T: Debug>(r: Result<T, Error>) {
+            assert!(matches!(r, Err(Error::NegativeSize)), "expected `{:?}`, got `{:?}`", Err::<T, _>(Error::NegativeSize), r)
         }
     }
 
@@ -1947,15 +1959,41 @@ mod test {
         },
         (read_delimited_varint_field | read_delimited_varint_field_any) = [10, 2, 10, 1] => |r| {
             r.then(a::read_tag::value(10))
-             .then((|r: &mut CodedReader<_>| {
-                r.read_limit()?.then(|r| {
-                    r.then(a::read_tag::value(10))
-                     .then(a::read_varint32.with(a::value(1)))
-                     .then(a::read_tag::none());
-                    Ok(())
-                })
-             }).with(a::value(())))
+            .then(a::read_limited(|r| {
+                r.then(a::read_tag::value(10))
+                 .then(a::read_varint32.with(a::value(1)))
+                 .then(a::read_tag::none());
+                Ok(())
+              }).with(a::value(())))
              .then(a::read_tag::none());
+        },
+        // this should throw an error at *some point*, streams can't check ahead of time but flat inputs can
+        (read_truncated_delimited_field | read_truncated_delimited_field_any) = [10, 2, 10] => |r| {
+            r.then(a::read_tag::value(10))
+             .then(a::read_limited(|r| {
+                r.then(a::read_tag::value(10));
+                r.read_varint32()
+              }).with(a::stream_error));
+        },
+        (read_negative_delimited_field | read_negative_delimited_field_any) = [10, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1] => |r| {
+            r.then(a::read_tag::value(10))
+             .then(a::read_limited(|_| Ok(())).with(a::negative_size));
+        },
+        (read_nested_delimited_field | read_nested_delimited_field_any) = [10, 8, 8, 1, 18, 2, 8, 1, 16, 2] => |r| {
+            r.then(a::read_tag::value(10))
+             .then(a::read_limited(|r| {
+                r.then(a::read_tag::value(8))
+                 .then(a::read_varint32.with(a::value(1)))
+                 .then(a::read_tag::value(18))
+                 .then(a::read_limited(|r| {
+                    r.then(a::read_tag::value(8))
+                     .then(a::read_varint32.with(a::value(1)));
+                    Ok(())
+                 }).with(a::value(())))
+                 .then(a::read_tag::value(16))
+                 .then(a::read_varint32.with(a::value(2)));
+                 Ok(())
+             }).with(a::value(())));
         }
     }
 
@@ -2022,7 +2060,10 @@ mod test {
                     skip_length_delimited_truncated_byte, skip_length_delimited_truncated_byte_any,
                     skip_group, skip_group_any,
                     skip_group_other_field_end, skip_group_other_field_end_any,
-                    read_delimited_varint_field, read_delimited_varint_field_any
+                    read_delimited_varint_field, read_delimited_varint_field_any,
+                    read_truncated_delimited_field, read_truncated_delimited_field_any,
+                    read_negative_delimited_field, read_negative_delimited_field_any,
+                    read_nested_delimited_field, read_nested_delimited_field_any
                 }
             }
         };
