@@ -137,7 +137,7 @@ impl UnknownFieldSet {
                     let end_tag = Tag::new(last_tag.field(), WireType::EndGroup);
                     while let Some(tag) = input.read_tag()? {
                         if tag != end_tag {
-                            group.add_field_from(input)?;
+                            input.recurse(|input| group.add_field_from(input))?;
                         } else {
                             break;
                         }
@@ -145,7 +145,7 @@ impl UnknownFieldSet {
                     self.push_value(last_tag.field(), UnknownField::Group(group));
                 },
                 WireType::Bit32 => self.push_value(last_tag.field(), UnknownField::Bit32(input.read_bit32()?)),
-                WireType::EndGroup => unreachable!()
+                WireType::EndGroup => return Err(read::Error::InvalidTag(last_tag.get()))
             }
         }
         Ok(())
