@@ -167,12 +167,10 @@ mod internal {
             if self.can_write(len) {
                 unsafe { write_varint32_unchecked(value, self.current); }
                 Ok(())
+            } else if let Some(mut buffer) = self.as_borrowed_stream() {
+                buffer.write_varint32(value, len)
             } else {
-                if let Some(mut buffer) = self.as_borrowed_stream() {
-                    buffer.write_varint32(value, len)
-                } else {
-                    Err(stream::Error.into())
-                }
+                Err(stream::Error.into())
             }
         }
         fn write_varint64(&mut self, value: u64) -> Result {
@@ -180,12 +178,10 @@ mod internal {
             if self.can_write(len) {
                 unsafe { write_varint64_unchecked(value, self.current); }
                 Ok(())
+            } else if let Some(mut buffer) = self.as_borrowed_stream() {
+                buffer.write_varint64(value, len)
             } else {
-                if let Some(mut buffer) = self.as_borrowed_stream() {
-                    buffer.write_varint64(value, len)
-                } else {
-                    Err(stream::Error.into())
-                }
+                Err(stream::Error.into())
             }
         }
         fn write_bit32(&mut self, value: u32) -> Result {
@@ -193,12 +189,10 @@ mod internal {
                 let value = u32::to_le_bytes(value);
                 unsafe { write_bytes_unchecked(&value, self.current); }
                 Ok(())
+            } else if let Some(mut buffer) = self.as_borrowed_stream() {
+                buffer.write_bit32(value)
             } else {
-                if let Some(mut buffer) = self.as_borrowed_stream() {
-                    buffer.write_bit32(value)
-                } else {
-                    Err(stream::Error.into())
-                }
+                Err(stream::Error.into())
             }
         }
         fn write_bit64(&mut self, value: u64) -> Result {
@@ -206,12 +200,10 @@ mod internal {
                 let value = u64::to_le_bytes(value);
                 unsafe { write_bytes_unchecked(&value, self.current); }
                 Ok(())
+            } else if let Some(mut buffer) = self.as_borrowed_stream() {
+                buffer.write_bit64(value)
             } else {
-                if let Some(mut buffer) = self.as_borrowed_stream() {
-                    buffer.write_bit64(value)
-                } else {
-                    Err(stream::Error.into())
-                }
+                Err(stream::Error.into())
             }
         }
         fn write_length_delimited(&mut self, value: &[u8]) -> Result {
@@ -221,14 +213,13 @@ mod internal {
             if self.can_write(len) {
                 unsafe { write_bytes_unchecked(value, self.current); }
                 Ok(())
+            } else if let Some(mut buffer) = self.as_borrowed_stream() {
+                buffer.write_bytes(value)
             } else {
-                if let Some(mut buffer) = self.as_borrowed_stream() {
-                    buffer.write_bytes(value)
-                } else {
-                    Err(stream::Error.into())
-                }
+                Err(stream::Error.into())
             }
         }
+        #[allow(clippy::map_clone)]
         fn as_any<'a>(&'a mut self) -> Any<'a> {
             Any {
                 stream: self.stream.as_mut().map::<&'a mut dyn Write, _>(|w| *w),
@@ -627,10 +618,16 @@ impl<'a> CodedWriter<Slice<'a>> {
 
 impl<'a> CodedWriter<SliceUnchecked<'a>> {
     /// Creates a coded writer that writes to the specified slice without performing any length checks
+    /// 
+    /// # Safety
+    /// 
+    /// Caution must be used when using the resulting writer as any writes outside of the slice are
+    /// undefined behavior.
     pub unsafe fn with_slice_unchecked(s: &'a mut [u8]) -> Self {
         Self { inner: SliceUnchecked::new(s) }
     }
-    /// Returns ownership of the buffer at the current point in the slice.
+    /// Returns ownership of the buffer at the current point in the slice. This result of this is
+    /// undefined if the writer has written past the end of the slice.
     pub fn into_inner(self) -> &'a mut [u8] {
         self.inner.into_inner()
     }

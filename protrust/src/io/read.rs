@@ -388,7 +388,7 @@ mod internal {
                     } else {
                         let remaining = i32::wrapping_add(self.buffer.to_limit_len() as i32, **remaining_limit);
                         if remaining < limit {
-                            Err(stream::Error.into())
+                            Err(stream::Error)
                         } else {
                             **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
                             Ok(Some(i32::wrapping_sub(remaining, limit)))
@@ -398,7 +398,7 @@ mod internal {
                 None => {
                     if let Some(existing_limit) = self.buffer.remaining_limit() {
                         if existing_limit < limit {
-                            Err(stream::Error.into())
+                            Err(stream::Error)
                         } else {
                             let old = i32::wrapping_sub(existing_limit, limit);
                             unsafe { self.buffer.apply_limit(limit) };
@@ -409,7 +409,7 @@ mod internal {
                         unsafe {
                             match i32::try_from(limit_len) {
                                 Ok(end) if limit > end => {
-                                    Err(stream::Error.into())
+                                    Err(stream::Error)
                                 },
                                 _ => {
                                     self.buffer.apply_limit(limit);
