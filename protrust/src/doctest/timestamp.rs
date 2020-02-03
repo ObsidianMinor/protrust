@@ -84,8 +84,4 @@ impl Message for Timestamp {
     fn unknown_fields_mut(&mut self) -> &mut UnknownFieldSet {
         &mut self.unknown_fields
     }
-
-    fn new() -> Self {
-        Default::default()
-    }
 }
