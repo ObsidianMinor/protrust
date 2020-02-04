@@ -89,6 +89,13 @@ impl<V: Value> RepeatedValue<V> for RepeatedField<V::Inner> {
             )
         };
         let builder = builder.add_bytes(tags_len)?;
+        let builder = 
+            // for groups we can add the tags length again for the end tags
+            if V::WIRE_TYPE == WireType::StartGroup {
+                builder.add_bytes(tags_len)?
+            } else {
+                builder
+            };
         <Self as ValuesSize<V>>::calculate_size(self, builder)
     }
     #[inline]
