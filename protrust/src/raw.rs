@@ -362,7 +362,9 @@ impl Value for String {
 
     fn calculate_size(this: &Self::Inner, builder: LengthBuilder) -> Option<LengthBuilder> {
         let len: i32 = this.len().try_into().ok()?;
-        builder.add_bytes(Length::new(len)?)
+        builder
+            .add_value::<Uint32>(&(len as u32))?
+            .add_bytes(unsafe { Length::new_unchecked(len) })
     }
     fn merge_from<T: Input>(this: &mut Self::Inner, input: &mut CodedReader<T>) -> read::Result<()> {
         Self::read_new(input).map(|v| *this = v)
@@ -388,7 +390,9 @@ impl<T: ByteString> Value for Bytes<T> {
 
     fn calculate_size(this: &Self::Inner, builder: LengthBuilder) -> Option<LengthBuilder> {
         let len: i32 = this.as_ref().len().try_into().ok()?;
-        builder.add_bytes(Length::new(len)?)
+        builder
+            .add_value::<Uint32>(&(len as u32))?
+            .add_bytes(unsafe { Length::new_unchecked(len) })
     }
     fn merge_from<U: Input>(this: &mut Self::Inner, input: &mut CodedReader<U>) -> read::Result<()> {
         Self::read_new(input).map(|v| *this = v)
@@ -576,6 +580,10 @@ mod test {
                     128 => [128, 1],
                     16383 => [255, 127],
                     16384 => [128, 128, 1],
+                    2097151 => [255, 255, 127],
+                    2097152 => [128, 128, 128, 1],
+                    268435455 => [255, 255, 255, 127],
+                    268435456 => [128, 128, 128, 128, 1],
                     -1 => [255, 255, 255, 255, 255, 255, 255, 255, 255, 1],
                     i32::min_value() => [128, 128, 128, 128, 248, 255, 255, 255, 255, 1],
                 },
@@ -612,6 +620,7 @@ mod test {
         }
     }
     mod uint32 {
+        use crate::io::Length;
         use crate::raw::Uint32;
 
         test_cases! {
@@ -621,6 +630,42 @@ mod test {
                     1 => [1],
                     127 => [127],
                     128 => [128, 1],
+                    16383 => [255, 127],
+                    16384 => [128, 128, 1],
+                    2097151 => [255, 255, 127],
+                    2097152 => [128, 128, 128, 1],
+                    268435455 => [255, 255, 255, 127],
+                    268435456 => [128, 128, 128, 128, 1],
+                },
+                size: calculate_uint32_size => {
+                    0                => Length::new(1),
+                    1                => Length::new(1),
+
+                    127              => Length::new(1),
+                    128              => Length::new(2),
+
+                    16383            => Length::new(2),
+                    16384            => Length::new(3),
+
+                    2097151          => Length::new(3),
+                    2097152          => Length::new(4),
+
+                    268435455        => Length::new(4),
+                    268435456        => Length::new(5),
+
+                    u32::max_value() => Length::new(5),
+                },
+                read: read_uint32 => {
+                    [0] => Ok(0),
+                    [1] => Ok(1),
+                    [127] => Ok(127),
+                    [128, 1] => Ok(128),
+                    [255, 127] => Ok(16383),
+                    [128, 128, 1] => Ok(16384),
+                    [255, 255, 127] => Ok(2097151),
+                    [128, 128, 128, 1] => Ok(2097152),
+                    [255, 255, 255, 127] => Ok(268435455),
+                    [128, 128, 128, 128, 1] => Ok(268435456),
                 }
             }
         }
@@ -672,10 +717,96 @@ mod test {
 
     }
     mod bytes {
+        use alloc::vec;
+        use alloc::vec::Vec;
+        use crate::io::Length;
+        use crate::raw::Bytes;
 
+        test_cases! {
+            Bytes<Vec<u8>> => {
+                size: calculate_bytes_size => {
+                    vec![]        => Length::new(1),
+                    vec![1, 2, 3] => Length::new(4),
+                    vec![0; 128]  => Length::new(130),
+                },
+                read: read_bytes => {
+                    [0] => Ok(val) if val == [],
+                    [3, 1, 2, 3] => Ok(val) if val == [1, 2, 3],
+                },
+                write: write_bytes => {
+                    vec![] => [0],
+                    vec![1, 2, 3] => [3, 1, 2, 3],
+                }
+            }
+        }
     }
     mod r#enum {
+        use core::fmt::{self, Debug, Formatter};
+        use crate::io::Length;
+        use crate::raw::Enum;
 
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct FooBar(pub i32);
+
+        impl FooBar {
+            pub const NEGATIVE: FooBar = FooBar(-1);
+            pub const DEFAULT: FooBar = FooBar(0);
+            pub const XYZZY: FooBar = FooBar(1);
+            pub const ALIAS: FooBar = FooBar(1);
+        }
+
+        impl From<i32> for FooBar {
+            fn from(i: i32) -> Self {
+                Self(i)
+            }
+        }
+
+        impl From<FooBar> for i32 {
+            fn from(f: FooBar) -> i32 {
+                f.0
+            }
+        }
+
+        impl Debug for FooBar {
+            fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+                match *self {
+                    FooBar::NEGATIVE => write!(f, "NEGATIVE"),
+                    FooBar::DEFAULT => write!(f, "DEFAULT"),
+                    FooBar::XYZZY => write!(f, "XYZZY"),
+                    FooBar(i) => i.fmt(f),
+                }
+            }
+        }
+
+        impl crate::Enum for FooBar { }
+
+        test_cases! {
+            Enum<FooBar> => {
+                size: calculate_enum_size => {
+                    FooBar::DEFAULT  => Length::new(1),
+                    FooBar::XYZZY    => Length::new(1),
+                    FooBar::ALIAS    => Length::new(1),
+                    FooBar::NEGATIVE => Length::new(10),
+
+                    FooBar(i32::max_value()) => Length::new(5),
+                },
+                read: read_enum => {
+                    [255, 255, 255, 255, 255, 255, 255, 255, 255, 1] => Ok(FooBar::NEGATIVE),
+                    [0] => Ok(FooBar::DEFAULT),
+                    [1] => Ok(FooBar::XYZZY),
+                    [1] => Ok(FooBar::ALIAS),
+
+                    [127] => Ok(FooBar(127)),
+                },
+                write: write_enum => {
+                    FooBar::NEGATIVE => [255, 255, 255, 255, 255, 255, 255, 255, 255, 1],
+                    FooBar::DEFAULT => [0],
+                    FooBar::XYZZY => [1],
+                    FooBar::ALIAS => [1],
+                    FooBar(127) => [127],
+                }
+            }
+        }
     }
     mod message {
 

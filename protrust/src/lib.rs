@@ -291,7 +291,7 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
 /// # }
 /// assert_eq!(format!("{:?}", Aliased::ALIAS), "FOO");
 /// ```
-pub trait Enum: From<i32> + Into<i32> + Default + Clone + Copy + PartialEq + Eq + Hash + Debug { }
+pub trait Enum: From<i32> + Into<i32> + Default + Clone + Copy + PartialEq + Eq + PartialOrd + Ord + Hash + Debug { }
 
 /// A type that can be merged with one of `T`. Merge behavior is specific to each type.
 /// 

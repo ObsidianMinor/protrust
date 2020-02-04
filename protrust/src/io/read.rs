@@ -1628,19 +1628,19 @@ impl<T: Input> CodedReader<T> {
 #[cfg(test)]
 mod test {
     use alloc::borrow::BorrowMut;
-    use crate::io::read::{Any, Input, CodedReader};
+    use crate::io::read::{Any, Input, Builder, CodedReader};
 
     pub trait ReaderInput<'a> {
         type Reader: Input + 'a;
 
-        fn new(b: &'a [u8]) -> CodedReader<Self::Reader>;
+        fn new(b: &'a [u8], builder: Builder) -> CodedReader<Self::Reader>;
 
-        fn run<F: FnOnce(&mut CodedReader<Self::Reader>)>(b: &'a [u8], f: F) {
-            let mut reader = Self::new(b);
+        fn run<F: FnOnce(&mut CodedReader<Self::Reader>)>(b: &'a [u8], builder: Builder, f: F) {
+            let mut reader = Self::new(b, builder);
             f(&mut reader)
         }
-        fn run_any<F: FnOnce(&mut CodedReader<Any>)>(b: &'a [u8], f: F) {
-            let mut reader = Self::new(b);
+        fn run_any<F: FnOnce(&mut CodedReader<Any>)>(b: &'a [u8], builder: Builder, f: F) {
+            let mut reader = Self::new(b, builder);
             let mut convert = reader.as_any();
             f(&mut convert)
         }
@@ -1768,18 +1768,28 @@ mod test {
     use a::ReadAction;
 
     macro_rules! test {
-        ($(($ti:ident | $tia:ident) = $x:expr => |$f:ident| $t:block),+) => {
+        ($(($ti:ident | $tia:ident $(| init: || $init:expr)?) = $x:expr => |$f:ident| $t:block),+) => {
             $(
                 pub fn $ti<T: for<'a> ReaderInput<'a>>() {
                     static INPUT: &'static [u8] = &$x;
 
-                    T::run(INPUT, |$f| $t);
+                    let builder =
+                        None
+                        $(.or_else(|| Some($init)))?
+                        .unwrap_or_else(Builder::new);
+
+                    T::run(INPUT, builder, |$f| $t);
                 }
 
                 pub fn $tia<T: for<'a> ReaderInput<'a>>() {
                     static INPUT: &'static [u8] = &$x;
 
-                    T::run_any(INPUT, |$f| $t);
+                    let builder =
+                        None
+                        $(.or_else(|| Some($init)))?
+                        .unwrap_or_else(Builder::new);
+
+                    T::run_any(INPUT, builder, |$f| $t);
                 }
             )+
         };
@@ -2071,14 +2081,14 @@ mod test {
 
     mod suites {
         mod slice {
-            use crate::io::read::{Slice, CodedReader, test::ReaderInput};
+            use crate::io::read::{Slice, Builder, CodedReader, test::ReaderInput};
 
             pub struct SliceInput;
             impl<'a> ReaderInput<'a> for SliceInput {
                 type Reader = Slice<'a>;
 
-                fn new(b: &'a [u8]) -> CodedReader<Self::Reader> {
-                    CodedReader::with_slice(b)
+                fn new(b: &'a [u8], build: Builder) -> CodedReader<Self::Reader> {
+                    build.with_slice(b)
                 }
             }
 
@@ -2088,15 +2098,15 @@ mod test {
         mod stream {
             macro_rules! stream_case {
                 ($i:ident($s:expr)) => {
-                    use crate::io::read::{CodedReader, Stream, test::ReaderInput};
+                    use crate::io::read::{CodedReader, Builder, Stream, test::ReaderInput};
 
                     pub struct $i;
 
                     impl<'a> ReaderInput<'a> for $i {
                         type Reader = Stream<&'a [u8]>;
 
-                        fn new(b: &'a [u8]) -> CodedReader<Self::Reader> {
-                            CodedReader::with_capacity($s, b)
+                        fn new(b: &'a [u8], build: Builder) -> CodedReader<Self::Reader> {
+                            build.with_capacity($s, b)
                         }
                     }
                 };

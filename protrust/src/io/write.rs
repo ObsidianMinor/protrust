@@ -794,9 +794,46 @@ mod test {
             w.write_varint32(128)
         } => Ok(([128, 1], [])),
 
-        (write_varint32_3byte | write_varint32_3byte_any | size: 3) = |w| {
-            w.write_varint32(16384)
-        } => Ok(([128, 128, 1], []))
+        (write_varint32_5byte | write_varint32_5byte_any | size: 5) = |w| {
+            w.write_varint32(268435456)
+        } => Ok(([128, 128, 128, 128, 1], [])),
+
+        (write_varint64_zero | write_varint64_zero_any | size: 1) = |w| {
+            w.write_varint64(0)
+        } => Ok(([0], [])),
+
+        (write_varint64_2byte | write_varint64_2byte_any | size: 2) = |w| {
+            w.write_varint64(128)
+        } => Ok(([128, 1], [])),
+
+        (write_varint64_5byte | write_varint64_5byte_any | size: 5) = |w| {
+            w.write_varint64(268435456)
+        } => Ok(([128, 128, 128, 128, 1], [])),
+        
+        (write_varint64_10byte | write_varint64_10byte_any | size: 10) = |w| {
+            w.write_varint64(0x8000000000000000)
+        } => Ok(([128, 128, 128, 128, 128, 128, 128, 128, 128, 1], [])),
+
+        (write_bit32 | write_bit32_any | size: 4) = |w| {
+            w.write_bit32(0)
+        } => Ok(([0, 0, 0, 0], [])),
+
+        (write_bit64 | write_bit64_any | size: 8) = |w| {
+            w.write_bit64(0)
+        } => Ok(([0, 0, 0, 0, 0, 0, 0, 0], [])),
+
+        (write_length_delimited | write_length_delimited_any | size: 4) = |w| {
+            w.write_length_delimited(&[1, 2, 3])
+        } => Ok(([3, 1, 2, 3], [])),
+
+        (write_as_any | write_as_any_any | size: 6) = |w| {
+            w.write_varint32(8)?;
+
+            let mut any = w.as_any();
+            any.write_length_delimited(&[1, 2, 3])?;
+
+            w.write_varint32(1)
+        } => Ok(([8, 3, 1, 2, 3, 1], []))
     }
 
     macro_rules! run {
@@ -820,7 +857,15 @@ mod test {
                 $f => {
                     write_varint32_zero, write_varint32_zero_any,
                     write_varint32_2byte, write_varint32_2byte_any,
-                    write_varint32_3byte, write_varint32_3byte_any
+                    write_varint32_5byte, write_varint32_5byte_any,
+                    write_varint64_zero, write_varint64_zero_any,
+                    write_varint64_2byte, write_varint64_2byte_any,
+                    write_varint64_5byte, write_varint64_5byte_any,
+                    write_varint64_10byte, write_varint64_10byte_any,
+                    write_bit32, write_bit32_any,
+                    write_bit64, write_bit64_any,
+                    write_length_delimited, write_length_delimited_any,
+                    write_as_any, write_as_any_any
                 }
             }
         };
