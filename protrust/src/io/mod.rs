@@ -475,6 +475,14 @@ pub struct LengthBuilder(i32);
 
 impl LengthBuilder {
     /// Creates a new length builder
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use protrust::io::LengthBuilder;
+    /// 
+    /// let builder = LengthBuilder::new();
+    /// assert_eq!(builder.build().get(), 0);
     #[inline]
     pub const fn new() -> LengthBuilder {
         Self(0)
@@ -484,11 +492,11 @@ impl LengthBuilder {
     #[inline]
     #[must_use = "this returns the builder to chain and does not mutate it in place"]
     pub fn add_bytes(self, value: Length) -> Option<Self> {
-        #[cfg(feature = "checked_size")]
-        return self.0.checked_add(value.get()).map(LengthBuilder);
-
-        #[cfg(not(feature = "checked_size"))]
-        return Some(LengthBuilder(self.0 + value.get()));
+        if cfg!(feature = "checked_size") {
+            self.0.checked_add(value.get()).map(LengthBuilder)
+        } else {
+            Some(LengthBuilder(self.0 + value.get()))
+        }
     }
 
     /// Adds a tag's size to the length

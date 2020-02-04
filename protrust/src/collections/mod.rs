@@ -79,13 +79,16 @@ impl<V: Value> RepeatedValue<V> for RepeatedField<V::Inner> {
 
         let tag = Tag::new(num, V::WIRE_TYPE);
         let tag_len = io::raw_varint32_size(tag.get());
-        let builder =
-            builder.add_bytes(Length::new({
-                #[cfg(feature = "checked_size")]
-                { tag_len.get().checked_mul(len)? }
-                #[cfg(not(feature = "checked_size"))]
-                { tag_len.get() * len }
-            })?)?;
+        let tags_len = unsafe { 
+            Length::new_unchecked(
+                if cfg!(feature = "checked_size") {
+                    tag_len.get().checked_mul(len)?
+                } else {
+                    tag_len.get() * len
+                }
+            )
+        };
+        let builder = builder.add_bytes(tags_len)?;
         <Self as ValuesSize<V>>::calculate_size(self, builder)
     }
     #[inline]
@@ -193,12 +196,12 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
         let len: i32 = self.len().try_into().ok()?;
         let tag = Tag::new(num, WireType::LengthDelimited);
         let tag_len = io::raw_varint32_size(tag.get()).get();
-        let start_len = { // every size calculation starts with the size of all tags
-            #[cfg(feature = "checked_size")]
-            { len.checked_mul(tag_len)?.checked_add(len.checked_mul(2)?)? }
-            #[cfg(not(feature = "checked_size"))]
-            { (len * tag_len) + (len * 2) }
-        };
+        let start_len = // every size calculation starts with the size of all tags
+            if cfg!(feature = "checked_size") {
+                len.checked_mul(tag_len)?.checked_add(len.checked_mul(2)?)?
+            } else {
+                (len * tag_len) + (len * 2)
+            };
         let mut builder = builder.add_bytes(Length::new(start_len)?)?;
         for (key, value) in self {
             let entry_len = 
@@ -276,10 +279,12 @@ impl<V> ValuesSize<V> for RepeatedField<V::Inner>
         let size = V::SIZE;
         let len: i32 = self.len().try_into().ok()?;
 
-        #[cfg(feature = "checked_size")]
-        return builder.add_bytes(unsafe { Length::new_unchecked(len.checked_mul(size.get())?) });
-
-        #[cfg(not(feature = "checked_size"))]
-        return builder.add_bytes(Length::new(len * size.get())?);
+        builder.add_bytes(unsafe {
+            if cfg!(feature = "checked_size") {
+                Length::new_unchecked(len.checked_mul(size.get())?)
+            } else {
+                Length::new_unchecked(len * size.get())
+            }
+        })
     }
 }
