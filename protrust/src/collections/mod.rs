@@ -44,7 +44,7 @@ pub enum TryRead<'a, T: Input> {
 impl<'a, T: Input> TryRead<'a, T> {
     /// Tries to read the field into the specified set. If the field has already been read, this does nothing.
     #[inline]
-    pub fn or_try(self, set: &mut impl FieldSet) -> read::Result<TryRead<'a, T>> {
+    pub fn or_try<S: FieldSet>(self, set: &mut S) -> read::Result<TryRead<'a, T>> {
         match self {
             TryRead::Yielded(input) => set.try_add_field_from(input),
             TryRead::Consumed => Ok(TryRead::Consumed),
