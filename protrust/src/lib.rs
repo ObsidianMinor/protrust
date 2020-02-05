@@ -2,8 +2,6 @@
 
 #![feature(const_fn)]
 #![feature(specialization)]
-#![feature(box_into_raw_non_null)]
-#![feature(new_uninit)]
 #![feature(const_if_match)]
 #![feature(slice_ptr_range)]
 #![feature(bool_to_option)]
