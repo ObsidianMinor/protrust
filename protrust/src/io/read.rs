@@ -1354,20 +1354,46 @@ impl<'a, T: Input + 'a> FieldReader<'a, T> {
     }
     /// Reads the field value using the specified function, passing the checked tag value to set as the last tag
     #[inline]
-    pub fn read_value<R, F: FnOnce(&mut CodedReader<T>) -> Result<R>>(self, tag: Tag, f: F) -> Result<R> {
+    pub fn and_then<R, F: FnOnce(&mut CodedReader<T>) -> Result<R>>(self, tag: Tag, f: F) -> Result<R> {
         debug_assert_eq!(self.tag, tag.get(), "Provided tag does not match read tag value");
         self.inner.set_last_tag(Some(tag));
 
         f(self.inner)
     }
-
-    /// Reads the field value using the specified function, checking the tag before running the function.
+    /// Reads a value from the input.
+    ///
+    /// This sets the last tag to be a tag made from the specified field number and the value's wire type.
     #[inline]
-    pub fn check_and_read_value<R, F: FnOnce(&mut CodedReader<T>) -> Result<R>>(self, f: F) -> Result<R> {
+    pub fn read_value<V: Value>(self, field: FieldNumber) -> Result<V::Inner> {
+        self.and_then(Tag::new(field, V::WIRE_TYPE), V::read_new)
+    }
+    /// Merges a value from the input with an existing value.
+    /// 
+    /// This sets the last tag to be a tag made from the specified field number and the value's wire type.
+    #[inline]
+    pub fn merge_value<V: Value>(self, field: FieldNumber, inner: &mut V::Inner) -> Result<()> {
+        self.and_then(Tag::new(field, V::WIRE_TYPE), |input| input.merge_value::<V>(inner))
+    }
+    /// Adds entries to the specified collection.
+    /// 
+    /// This sets the last tag to be a tag made from the specified field number and the value's wire type.
+    #[inline]
+    pub fn add_entries_to<U: RepeatedValue<V>, V>(self, field: FieldNumber, value: &mut U) -> Result<()> {
+        self.and_then(Tag::new(field, U::WIRE_TYPE), |input| input.add_entries_to::<U, V>(value))
+    }
+
+    /// Reads the field value using the specified function, checking if the tag is valid before running the function.
+    #[inline]
+    pub fn check_and_then<R, F: FnOnce(&'a mut CodedReader<T>) -> Result<R>>(self, f: F) -> Result<R> {
         let tag = Tag::try_from(self.tag).map_err(|_| Error::InvalidTag(self.tag))?;
         self.inner.set_last_tag(Some(tag));
 
         f(self.inner)
+    }
+    /// Checks if the tag is valid before attempting to add the field to the set
+    #[inline]
+    pub fn check_and_try_add_field_to<F: FieldSet>(self, set: &mut F) -> Result<TryRead<'a, T>> {
+        self.check_and_then(|input| input.try_add_field_to::<F>(set))
     }
 }
 

@@ -10,6 +10,9 @@ pub mod unknown_fields;
 
 /// A type of value that writes and reads repeated values on the wire, a common trait unifying repeated and map fields.
 pub trait RepeatedValue<T>: Sealed {
+    /// Gets the wire type of tags in this field.
+    const WIRE_TYPE: WireType;
+
     /// Adds entries to the repeated field from the coded reader.
     fn add_entries_from<U: Input>(&mut self, input: &mut CodedReader<U>) -> read::Result<()>;
     /// Calculates the size of the repeated value.
@@ -65,6 +68,8 @@ pub type RepeatedField<T> = alloc::vec::Vec<T>;
 
 impl<T> Sealed for RepeatedField<T> { }
 impl<V: Value> RepeatedValue<V> for RepeatedField<V::Inner> {
+    const WIRE_TYPE: WireType = V::WIRE_TYPE;
+
     #[inline]
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         input.read_value::<V>().map(|v| self.push(v))
@@ -115,6 +120,8 @@ impl<V: Value> RepeatedValue<V> for RepeatedField<V::Inner> {
     }
 }
 impl<V: Value + Packable> RepeatedValue<Packed<V>> for RepeatedField<V::Inner> {
+    const WIRE_TYPE: WireType = WireType::LengthDelimited;
+
     #[inline]
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         input.read_limit()?.for_all(|input| input.read_value::<V>().map(|v| self.push(v)))
@@ -175,6 +182,8 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
         V: Value,
         V::Inner: Default
 {
+    const WIRE_TYPE: WireType = WireType::LengthDelimited;
+    
     fn add_entries_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {
         let key_tag = Tag::new(KEY_FIELD, K::WIRE_TYPE);
         let value_tag = Tag::new(VALUE_FIELD, V::WIRE_TYPE);
@@ -184,8 +193,8 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
         input.read_limit()?.then(|input| {
             while let Some(field) = input.read_field()? {
                 match field.tag() {
-                    k if k == key_tag.get() => field.read_value(key_tag, |input| input.read_value::<K>().map(|k| key = Some(k))),
-                    v if v == value_tag.get() => field.read_value(value_tag, |input| input.read_value::<V>().map(|v| value = Some(v))),
+                    k if k == key_tag.get() => field.and_then(key_tag, |input| input.read_value::<K>().map(|k| key = Some(k))),
+                    v if v == value_tag.get() => field.and_then(value_tag, |input| input.read_value::<V>().map(|v| value = Some(v))),
                     _ => input.skip(),
                 }?
             }
