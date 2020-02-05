@@ -25,6 +25,7 @@ mod internal {
     use crate::io::{ByteString, Tag, Length, internal::Array, stream::{self, Read}, read::{Result, Error}};
 
     /// State shared between all readers. This is borrowed by Any to manage state of a specialized reader
+    #[derive(Default)]
     pub struct SharedState {
         pub recursion_depth: usize,
         pub last_tag: Option<Tag>,
@@ -659,10 +660,7 @@ impl<'a> Slice<'a> {
         Self {
             a: PhantomData,
             buffer: Buffer::from_slice(value),
-            state: internal::SharedState {
-                recursion_depth: 0,
-                last_tag: None,
-            }
+            state: Default::default(),
         }
     }
 }
@@ -915,10 +913,7 @@ impl<T: Read> Stream<T> {
             buffer,
             remaining_limit: -1,
             reached_eof: false,
-            state: SharedState {
-                recursion_depth: 0,
-                last_tag: None,
-            }
+            state: Default::default(),
         }
     }
     fn into_inner(self) -> T {
