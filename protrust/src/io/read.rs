@@ -1628,10 +1628,10 @@ impl<T: Input> CodedReader<T> {
         self.increment_recursion_count()?;
 
         let guard = Guard { inner: self };
-        let result = f(guard.inner)?;
+        let result = f(guard.inner);
         drop(guard);
 
-        Ok(result)
+        result
     }
 
     /// Reads a field value. This offloads checking of the tag's value, making it faster when reading
