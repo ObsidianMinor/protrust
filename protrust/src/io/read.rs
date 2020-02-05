@@ -1239,29 +1239,6 @@ impl<T: Read> Reader for Stream<T> {
 unsafe impl<T: Send> Send for Stream<T> { }
 unsafe impl<T: Sync> Sync for Stream<T> { }
 
-#[derive(Clone, Debug)]
-struct ReaderOptions {
-    unknown_fields: UnknownFieldHandling,
-    registry: Option<&'static ExtensionRegistry>,
-    recursion_limit: usize,
-}
-
-impl Default for ReaderOptions {
-    fn default() -> Self {
-        ReaderOptions {
-            unknown_fields: UnknownFieldHandling::Store,
-            registry: None,
-            recursion_limit: 100,
-        }
-    }
-}
-
-/// A builder used to construct [`CodedReader`](struct.CodedReader.html) instances
-#[derive(Clone, Debug, Default)]
-pub struct Builder {
-    options: ReaderOptions
-}
-
 /// Handling options for unknown fields
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UnknownFieldHandling {
@@ -1283,6 +1260,29 @@ impl UnknownFieldHandling {
     pub fn skip(self) -> bool {
         self == UnknownFieldHandling::Skip
     }
+}
+
+#[derive(Clone, Debug)]
+struct ReaderOptions {
+    unknown_fields: UnknownFieldHandling,
+    registry: Option<&'static ExtensionRegistry>,
+    recursion_limit: usize,
+}
+
+impl Default for ReaderOptions {
+    fn default() -> Self {
+        ReaderOptions {
+            unknown_fields: UnknownFieldHandling::Store,
+            registry: None,
+            recursion_limit: 100,
+        }
+    }
+}
+
+/// A builder used to construct [`CodedReader`](struct.CodedReader.html) instances
+#[derive(Clone, Debug, Default)]
+pub struct Builder {
+    options: ReaderOptions
 }
 
 impl Builder {
