@@ -7,9 +7,10 @@ use core::convert::TryFrom;
 use core::fmt::{self, Display, Formatter};
 use core::marker::PhantomData;
 use core::result;
+use crate::Message;
 use crate::collections::{RepeatedValue, FieldSet, TryRead};
 use crate::extend::ExtensionRegistry;
-use crate::io::{Tag, WireType, ByteString, DEFAULT_BUF_SIZE, stream::{self, Read}};
+use crate::io::{Tag, WireType, FieldNumber, ByteString, DEFAULT_BUF_SIZE, stream::{self, Read}};
 use crate::raw::{self, Value};
 
 #[cfg(feature = "std")]
@@ -27,6 +28,7 @@ mod internal {
     pub struct SharedState {
         pub recursion_depth: usize,
         pub last_tag: Option<Tag>,
+        pub next_end_group: Option<Tag>,
     }
 
     /// A container for shared buffer manipulation logic.
@@ -1466,6 +1468,14 @@ impl<T: Input> CodedReader<T> {
     fn decrement_recursion_count(&mut self) {
         self.inner.state_mut().recursion_depth -= 1;
     }
+    #[inline]
+    fn push_group(&mut self, field: FieldNumber) -> Option<Tag> {
+        self.inner.state_mut().next_end_group.replace(Tag::new(field, WireType::EndGroup))
+    }
+    #[inline]
+    fn pop_group(&mut self, old: Option<Tag>) {
+        self.inner.state_mut().next_end_group = old;
+    }
     fn set_last_tag(&mut self, tag: Option<Tag>) {
         self.inner.state_mut().last_tag = tag;
     }
@@ -1513,10 +1523,21 @@ impl<T: Input> CodedReader<T> {
         self.inner.reached_limit()
     }
 
+    #[inline]
+    fn read_raw_tag(&mut self) -> Result<Option<u32>> {
+        let tag = self.inner.read_tag()?;
+        let end_group = self.inner.state().next_end_group.map(Tag::get);
+        if tag == end_group {
+            Ok(None)
+        } else {
+            Ok(tag)
+        }
+    }
+
     /// Reads a field tag from the input
     pub fn read_tag(&mut self) -> Result<Option<Tag>> {
         let tag = 
-            self.inner.read_tag()?
+            self.read_raw_tag()?
                 .map(|v| Tag::try_from(v).map_err(|_| Error::InvalidTag(v)))
                 .transpose()?;
         self.set_last_tag(tag);
@@ -1543,6 +1564,31 @@ impl<T: Input> CodedReader<T> {
     /// Reads a length delimited string of bytes.
     pub fn read_length_delimited<B: ByteString>(&mut self) -> Result<B> {
         self.inner.read_length_delimited()
+    }
+    /// Reads a group, merging it's fields into the provided message instance.
+    pub fn read_group<M: Message>(&mut self, value: &mut M) -> Result<()> {
+        struct Guard<'a, T: Input + 'a> {
+            inner: &'a mut CodedReader<T>,
+            last_group: Option<Tag>,
+        }
+        impl<'a, T: Input + 'a> Drop for Guard<'a, T> {
+            fn drop(&mut self) {
+                self.inner.pop_group(self.last_group);
+            }
+        }
+
+        if let Some(last_tag) = self.last_tag() {
+            debug_assert!(last_tag.wire_type() == WireType::StartGroup, "attempted to read group from tag that wasn't a start group tag");
+            let last_group = self.push_group(last_tag.field());
+    
+            let guard = Guard { inner: self, last_group };
+            let result = value.merge_from(guard.inner);
+            drop(guard);
+    
+            result
+        } else {
+            Ok(())
+        }
     }
     /// Skips the last field read from the input
     pub fn skip(&mut self) -> Result<()> {

@@ -487,7 +487,7 @@ impl<T: TraitMessage> Value for Group<T> {
         builder.add_bytes(this.calculate_size()?)
     }
     fn merge_from<U: Input>(this: &mut Self::Inner, input: &mut CodedReader<U>) -> read::Result<()> {
-        input.recurse(|input| this.merge_from(input))
+        input.recurse(|input| input.read_group(this))
     }
     fn write_to<U: Output>(this: &Self::Inner, output: &mut CodedWriter<U>) -> write::Result {
         this.write_to(output)
@@ -497,7 +497,7 @@ impl<T: TraitMessage> Value for Group<T> {
     }
     fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
         let mut t = T::default();
-        t.merge_from(input)?;
+        Self::merge_from(&mut t, input)?;
         Ok(t)
     }
 }
