@@ -1,7 +1,8 @@
 #ifndef PROTRUSTC_RUST_GENERATOR_H__
 #define PROTRUSTC_RUST_GENERATOR_H__
 
-#include <string.h>
+#include <string>
+#include <vector>
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/compiler/code_generator.h>
@@ -26,4 +27,4 @@ public:
 } // compiler
 } // protrust
 
-#endif
+#endif // PROTRUSTC_RUST_GENERATOR_H__
