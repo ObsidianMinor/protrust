@@ -10,9 +10,8 @@ namespace compiler {
 struct Options {
     Options() :
         file_extension(".rs") {
-
     }
-    
+
     std::string file_extension;
     std::vector<std::string> imports;
 };

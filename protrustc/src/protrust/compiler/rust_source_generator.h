@@ -13,10 +13,10 @@ protected:
     RustSourceGenerator(const Options& options);
     virtual ~RustSourceGenerator();
 
-RustSourceGenerator(const RustSourceGenerator&) = delete;
-RustSourceGenerator& operator=(const RustSourceGenerator&) = delete;
+    RustSourceGenerator(const RustSourceGenerator&) = delete;
+    RustSourceGenerator& operator=(const RustSourceGenerator&) = delete;
 
-const Options& options();
+    const Options& options();
 
 private:
     const Options& options_;

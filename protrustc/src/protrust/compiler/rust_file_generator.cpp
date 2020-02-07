@@ -9,12 +9,12 @@ namespace protrust {
 namespace compiler {
 
 RustFileGenerator::RustFileGenerator(const FileDescriptor* file, const Options& options)
-	: RustSourceGenerator(options), _file(file) { }
+    : RustSourceGenerator(options), _file(file) { }
 
 RustFileGenerator::~RustFileGenerator() { }
 
 void RustFileGenerator::Generate(io::Printer& printer) {
-	// unimplemented
+    // unimplemented
 }
 
 } // compiler

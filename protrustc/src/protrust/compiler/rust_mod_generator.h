@@ -23,7 +23,7 @@ public:
     void Generate(const std::vector<const google::protobuf::FileDescriptor*>& files, google::protobuf::compiler::GeneratorContext* context);
 
 private:
-	void GenerateFileMod(const google::protobuf::FileDescriptor* file, google::protobuf::io::Printer& printer);
+    void GenerateFileMod(const google::protobuf::FileDescriptor* file, google::protobuf::io::Printer& printer);
 };
 
 } // compiler

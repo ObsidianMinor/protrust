@@ -9,15 +9,15 @@ namespace protrust {
 namespace compiler {
 
 std::string GetModPath(const google::protobuf::FileDescriptor* file, const char* import_name) {
-	std::string result;
-	// unimplemented
-	return result;
+    std::string result;
+    // unimplemented
+    return result;
 }
 
 std::string GetFileModName(const google::protobuf::FileDescriptor* file) {
-	std::string result;
-	// unimplemented
-	return result;
+    std::string result;
+    // unimplemented
+    return result;
 }
 
 } // compiler

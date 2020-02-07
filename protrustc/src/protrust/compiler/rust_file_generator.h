@@ -12,16 +12,16 @@ namespace compiler {
 
 class RustFileGenerator : public RustSourceGenerator {
 public:
-	RustFileGenerator(const google::protobuf::FileDescriptor* file, const Options& options);
-	~RustFileGenerator();
+    RustFileGenerator(const google::protobuf::FileDescriptor* file, const Options& options);
+    ~RustFileGenerator();
 
-	RustFileGenerator(const RustFileGenerator&) = delete;
-	RustFileGenerator& operator=(const RustFileGenerator&) = delete;
+    RustFileGenerator(const RustFileGenerator&) = delete;
+    RustFileGenerator& operator=(const RustFileGenerator&) = delete;
 
-	void Generate(google::protobuf::io::Printer& printer);
+    void Generate(google::protobuf::io::Printer& printer);
 
 private:
-	const google::protobuf::FileDescriptor* _file;
+    const google::protobuf::FileDescriptor* _file;
 };
 
 } // compiler
