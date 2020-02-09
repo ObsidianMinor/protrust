@@ -462,14 +462,14 @@ impl<T, V> ExtensionType for RepeatedExtension<T, Packed<V>>
 
 /// A registry used to contain all the extensions from a generated code module
 pub struct ExtensionRegistry {
-    by_num: HashMap<FieldNumber, &'static dyn ExtensionIdentifier>
+    by_num: HashMap<(TypeId, FieldNumber), &'static dyn ExtensionIdentifier>
 }
 
 impl ExtensionRegistry {
-    /// Returns whether an extension registry
+    /// Returns whether an extension registry contains the extension field
     pub fn contains<T: ?Sized + ExtensionIdentifier>(&self, id: &T) -> bool {
         self.by_num
-            .get(&id.field_number())
+            .get(&(id.message_type(), id.field_number()))
             .map(|b| *b as *const dyn ExtensionIdentifier as *const u8 == id as *const T as *const u8)
             .unwrap_or(false)
     }
@@ -484,7 +484,7 @@ impl Debug for ExtensionRegistry {
 /// A builder used to construct extension registries in generated code
 #[derive(Default)]
 pub struct RegistryBuilder {
-    by_num: HashMap<FieldNumber, &'static dyn ExtensionIdentifier>,
+    by_num: HashMap<(TypeId, FieldNumber), &'static dyn ExtensionIdentifier>,
 }
 
 impl RegistryBuilder {
@@ -496,9 +496,9 @@ impl RegistryBuilder {
     /// Adds the extensions in the specified registry to this registry
     #[inline]
     pub fn add_registry(mut self, registry: &'static ExtensionRegistry) -> Result<Self, ExtensionConflict> {
-        for (&num, &id) in &registry.by_num {
-            if self.by_num.insert(num, id).is_some() {
-                return Err(ExtensionConflict(num));
+        for (&typ_num_pair, &id) in &registry.by_num {
+            if self.by_num.insert(typ_num_pair, id).is_some() {
+                return Err(ExtensionConflict(typ_num_pair.1));
             }
         }
 
@@ -508,7 +508,8 @@ impl RegistryBuilder {
     #[inline]
     pub fn add_identifier(mut self, id: &'static dyn ExtensionIdentifier) -> Result<Self, ExtensionConflict> {
         let num = id.field_number();
-        match self.by_num.insert(num, id) {
+        let typ = id.message_type();
+        match self.by_num.insert((typ, num), id) {
             Some(_) => Err(ExtensionConflict(num)),
             None => Ok(self)
         }
@@ -624,7 +625,7 @@ impl<T: ExtendableMessage + 'static> FieldSet for ExtensionSet<T> {
                 // if the value doesn't already exist, try to find it in our registry
                 hash_map::Entry::Vacant(entry) => {
                     if let Some(registry) = self.registry {
-                        if let Some(ext) = registry.by_num.get(&field) {
+                        if let Some(ext) = registry.by_num.get(&(TypeId::of::<T>(), field)) {
                             let mut any = input.as_any();
                             return match ext.try_read_value(&mut any)? {
                                 TryReadValue::Consumed(b) => {
