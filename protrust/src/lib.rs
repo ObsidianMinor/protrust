@@ -8,17 +8,13 @@
 #![feature(vec_drain_as_slice)]
 #![feature(exact_size_is_empty)]
 #![feature(result_copied)]
-
-#![cfg_attr(feature = "std", feature(read_initializer))]
+#![feature(read_initializer)]
+#![feature(hash_raw_entry)]
 
 #![warn(missing_docs)]
 
-#![cfg_attr(not(feature = "std"), no_std)]
-
 #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
 compile_error!("This library does not support 16-bit platforms");
-
-extern crate alloc;
 
 mod internal {
     pub trait Sealed { }
@@ -32,9 +28,9 @@ pub mod extend;
 pub mod io;
 pub mod raw;
 
-use core::fmt::Debug;
-use core::hash::Hash;
 use crate::io::{read, write, Length, CodedReader, CodedWriter, Input, Output};
+use std::fmt::Debug;
+use std::hash::Hash;
 
 pub use collections::unknown_fields::UnknownFieldSet;
 
@@ -214,7 +210,7 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
 /// Similar code to the following would be generated:
 /// ```
 /// # use protrust::Enum;
-/// # use core::fmt::{self, Debug, Formatter};
+/// # use std::fmt::{self, Debug, Formatter};
 /// 
 /// ##[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 /// pub struct Syntax(pub i32);
@@ -270,7 +266,7 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
 /// 
 /// Will format as:
 /// ```
-/// # use core::fmt::{self, Debug, Formatter};
+/// # use std::fmt::{self, Debug, Formatter};
 /// # #[derive(PartialEq, Eq)]
 /// # pub struct Aliased(pub i32);
 /// # impl Aliased {

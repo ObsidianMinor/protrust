@@ -1,22 +1,17 @@
 //! Contains types and traits for reading and writing protobuf coded data.
 
-pub mod stream;
 pub mod read;
 pub mod write;
 
 pub use read::{Input, CodedReader};
 pub use write::{Output, CodedWriter};
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use core::convert::TryFrom;
-use core::fmt::{self, Display, Formatter};
-use core::num::NonZeroU32;
 use crate::collections::{RepeatedValue, FieldSet};
 use crate::raw::Value;
-
-#[cfg(feature = "std")]
+use std::convert::TryFrom;
 use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+use std::num::NonZeroU32;
 
 mod internal {
     pub trait Array: AsRef<[u8]> + AsMut<[u8]> {
@@ -203,7 +198,7 @@ impl Tag {
     /// 
     /// ```
     /// use protrust::io::{Tag, WireType};
-    /// use core::convert::TryFrom;
+    /// use std::convert::TryFrom;
     /// 
     /// assert_eq!(Tag::try_from(8).unwrap().wire_type(), WireType::Varint);
     /// assert_eq!(Tag::try_from(17).unwrap().wire_type(), WireType::Bit64);
@@ -213,7 +208,7 @@ impl Tag {
         match WireType::try_from((self.get() & 0b0111) as u8) {
             Ok(wt) => wt,
             // we can only reach this through unsafe code
-            Err(_) => unsafe { core::hint::unreachable_unchecked() }
+            Err(_) => unsafe { std::hint::unreachable_unchecked() }
         }
     }
 
@@ -223,7 +218,7 @@ impl Tag {
     /// 
     /// ```
     /// use protrust::io::Tag;
-    /// use core::convert::TryFrom;
+    /// use std::convert::TryFrom;
     /// 
     /// assert_eq!(Tag::try_from(8).unwrap().field().get(), 1);
     /// assert_eq!(Tag::try_from(17).unwrap().field().get(), 2);
@@ -267,7 +262,7 @@ impl From<Tag> for u32 {
 /// 
 /// ```
 /// use protrust::io::Tag;
-/// use core::convert::TryFrom;
+/// use std::convert::TryFrom;
 /// 
 /// // invalid field number 0
 /// assert!(Tag::try_from(0).is_err());
@@ -285,7 +280,6 @@ impl Display for TryTagFromRawError {
     }
 }
 
-#[cfg(feature = "std")]
 impl Error for TryTagFromRawError { }
 
 impl TryFrom<u32> for Tag {
@@ -297,7 +291,7 @@ impl TryFrom<u32> for Tag {
     ///
     /// ```
     /// use protrust::io::Tag;
-    /// use core::convert::TryFrom;
+    /// use std::convert::TryFrom;
     ///
     /// assert!(Tag::try_from(1).is_err()); // invalid field number 0
     /// assert!(Tag::try_from(8).is_ok());
@@ -564,7 +558,7 @@ impl ByteString for Box<[u8]> {
 
 impl ByteString for Vec<u8> {
     fn new(len: usize) -> Self {
-        alloc::vec![0; len]
+        vec![0; len]
     }
 }
 

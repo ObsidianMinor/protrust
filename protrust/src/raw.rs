@@ -1,10 +1,9 @@
 //! Contains types for protobuf values and traits for value operations.
 
-use alloc::vec::Vec;
-use core::convert::TryInto;
 use crate::{internal::Sealed, Message as TraitMessage};
 use crate::extend::ExtendableMessage;
 use crate::io::{self, read, write, WireType, ByteString, Length, LengthBuilder, CodedReader, CodedWriter, Input, Output};
+use std::convert::TryInto;
 
 /// A protobuf value type paired with a Rust type used to represent that type in generated code.
 /// 
@@ -355,7 +354,7 @@ impl ConstSized for Bool {
 pub struct String;
 impl Sealed for String { }
 impl ValueType for String {
-    type Inner = alloc::string::String;
+    type Inner = std::string::String;
 }
 impl Value for String {
     const WIRE_TYPE: WireType = WireType::LengthDelimited;
@@ -374,7 +373,7 @@ impl Value for String {
     }
     fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
-        alloc::string::String::from_utf8(input.read_value::<Bytes<Vec<_>>>()?)
+        std::string::String::from_utf8(input.read_value::<Bytes<Vec<_>>>()?)
             .map_err(io::read::Error::InvalidString)
     }
 }
@@ -525,7 +524,7 @@ mod test {
 
                     let value = $i;
                     let expected = $o;
-                    let mut output = alloc::vec![0; expected.len()].into_boxed_slice();
+                    let mut output = vec![0; expected.len()].into_boxed_slice();
                     let mut writer = CodedWriter::with_slice(&mut output);
 
                     writer.write_value::<$t>(&value).expect("failed to write value");
@@ -717,8 +716,6 @@ mod test {
 
     }
     mod bytes {
-        use alloc::vec;
-        use alloc::vec::Vec;
         use crate::io::Length;
         use crate::raw::Bytes;
 
@@ -741,9 +738,9 @@ mod test {
         }
     }
     mod r#enum {
-        use core::fmt::{self, Debug, Formatter};
         use crate::io::Length;
         use crate::raw::Enum;
+        use std::fmt::{self, Debug, Formatter};
 
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
         pub struct FooBar(pub i32);

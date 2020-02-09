@@ -3,8 +3,8 @@
 use crate::{Mergable, internal::Sealed};
 use crate::io::{self, read, write, WireType, FieldNumber, Tag, LengthBuilder, Length, CodedReader, CodedWriter, Input, Output};
 use crate::raw::{self, Value, Packable, Packed};
-use core::convert::TryInto;
-use core::hash::Hash;
+use std::convert::TryInto;
+use std::hash::Hash;
 
 pub mod unknown_fields;
 
@@ -64,7 +64,7 @@ impl<'a, T: Input> TryRead<'a, T> {
 }
 
 /// The type used by generated code to represent a repeated field.
-pub type RepeatedField<T> = alloc::vec::Vec<T>;
+pub type RepeatedField<T> = Vec<T>;
 
 impl<T> Sealed for RepeatedField<T> { }
 impl<V: Value> RepeatedValue<V> for RepeatedField<V::Inner> {
@@ -169,7 +169,7 @@ impl<V: Clone> Mergable for RepeatedField<V> {
 }
 
 /// The type used by generated code to represent a map field.
-pub type MapField<K, V> = hashbrown::HashMap<K, V>;
+pub type MapField<K, V> = std::collections::HashMap<K, V>;
 
 const KEY_FIELD: FieldNumber = unsafe { FieldNumber::new_unchecked(1) };
 const VALUE_FIELD: FieldNumber = unsafe { FieldNumber::new_unchecked(2) };
@@ -258,7 +258,7 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
     }
 }
 
-impl<K, V> Mergable for hashbrown::HashMap<K, V>
+impl<K, V> Mergable for std::collections::HashMap<K, V>
     where
         K: Clone + Eq + Hash,
         V: Clone + Mergable

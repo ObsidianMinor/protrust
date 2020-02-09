@@ -5,15 +5,14 @@
 //! 
 //! Unknown fields for unique field numbers can exist for multiple wire types at once to ensure that all data is properly returned.
 
-use alloc::boxed::Box;
-use alloc::vec::{self, Vec};
-use core::fmt::{self, Formatter, Debug};
-use core::iter::FusedIterator;
-use core::ops::RangeBounds;
 use crate::{internal::Sealed, Mergable};
 use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter, Input, Output};
 use crate::raw;
-use hashbrown::{HashMap, hash_map};
+use std::collections::{HashMap, hash_map};
+use std::fmt::{self, Formatter, Debug};
+use std::iter::FusedIterator;
+use std::ops::RangeBounds;
+use std::vec;
 use super::{FieldSet, TryRead};
 
 /// An unknown field in an [`UnknownFieldSet`](struct.UnknownFieldSet.html).

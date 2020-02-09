@@ -1,28 +1,53 @@
 //! Defines the `CodedReader`, a reader for reading values from a protobuf encoded byte stream.
 
-use alloc::boxed::Box;
-use alloc::string::FromUtf8Error;
-use core::cmp::{self, Ordering};
-use core::convert::TryFrom;
-use core::fmt::{self, Display, Formatter};
-use core::marker::PhantomData;
-use core::result;
 use crate::Message;
 use crate::collections::{RepeatedValue, FieldSet, TryRead};
 use crate::extend::ExtensionRegistry;
-use crate::io::{Tag, WireType, FieldNumber, ByteString, DEFAULT_BUF_SIZE, stream::{self, Read}};
+use crate::io::{Tag, WireType, FieldNumber, Length, ByteString, DEFAULT_BUF_SIZE};
 use crate::raw::{self, Value};
-
-#[cfg(feature = "std")]
+use std::boxed::Box;
+use std::cmp::{self, Ordering};
+use std::convert::TryFrom;
 use std::error;
+use std::fmt::{self, Display, Formatter};
+use std::io::{self, Read, ErrorKind};
+use std::marker::PhantomData;
+use std::result;
+use std::string::FromUtf8Error;
+
+/// A trait used by `CodedReader`s to efficiently skip bytes in an input.
+pub trait Skip: Read {
+    /// Skips a series of bytes from the input
+    fn skip_exact(&mut self, amnt: Length) -> io::Result<()>;
+}
+
+impl<T: ?Sized + Read> Skip for T {
+    default fn skip_exact(&mut self, amnt: Length) -> io::Result<()> {
+        let mut take = self.take(amnt.get() as u64);
+        let mut sink = io::sink();
+        io::copy(&mut take, &mut sink)?;
+        if take.limit() != 0 {
+            Err(io::Error::from(ErrorKind::UnexpectedEof))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<T: ?Sized + Read + io::Seek> Skip for T {
+    default fn skip_exact(&mut self, amnt: Length) -> io::Result<()> {
+        self.seek(io::SeekFrom::Current(amnt.get() as i64)).map(|_| ())
+    }
+}
 
 mod internal {
-    use core::cmp::{self, Ordering};
-    use core::convert::TryFrom;
-    use core::ops::Range;
-    use core::ptr::{self, NonNull};
-    use core::result;
-    use crate::io::{ByteString, Tag, Length, internal::Array, stream::{self, Read}, read::{Result, Error}};
+    use crate::io::{ByteString, Tag, Length, internal::Array, read::{Result, Error}};
+    use std::cmp::{self, Ordering};
+    use std::convert::TryFrom;
+    use std::io::{self, Read as _, ErrorKind};
+    use std::ops::Range;
+    use std::ptr::{self, NonNull};
+    use super::Skip as Read;
 
     /// State shared between all readers. This is borrowed by Any to manage state of a specialized reader
     #[derive(Default)]
@@ -68,11 +93,11 @@ mod internal {
         }
         #[inline]
         pub unsafe fn to_limit_as_slice<'a>(&self) -> &'a [u8] {
-            core::slice::from_raw_parts(self.start.as_ptr() as _, self.to_limit_len())
+            std::slice::from_raw_parts(self.start.as_ptr() as _, self.to_limit_len())
         }
         #[inline]
         pub unsafe fn to_end_as_slice<'a>(&self) -> &'a [u8] {
-            core::slice::from_raw_parts(self.start.as_ptr() as _, self.to_end_len())
+            std::slice::from_raw_parts(self.start.as_ptr() as _, self.to_end_len())
         }
         #[inline]
         pub unsafe fn advance(&mut self, amnt: usize) {
@@ -161,7 +186,7 @@ mod internal {
         fn state(&self) -> &SharedState;
         fn state_mut(&mut self) -> &mut SharedState;
 
-        fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>>;
+        fn push_limit(&mut self, limit: i32) -> io::Result<Option<i32>>;
         fn pop_limit(&mut self, old: Option<i32>);
         fn reached_limit(&self) -> bool;
 
@@ -211,7 +236,7 @@ mod internal {
                 Some(BorrowedStream { remaining_limit: &mut 0, .. }) | None => {
                     if limit_len < slice.len() {
                         unsafe { self.buffer.advance(limit_len); }
-                        return Err(stream::Error.into());
+                        return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
                     }
     
                     unsafe {
@@ -239,14 +264,14 @@ mod internal {
             } else {
                 let remaining_limit = **limit as usize;
                 if remaining_limit == 0 {
-                    Err(stream::Error.into())
+                    Err(io::Error::from(ErrorKind::UnexpectedEof).into())
                 } else if remaining_limit >= buf.len() {
                     **limit = i32::wrapping_sub(**limit, buf.len() as i32);
                     stream.read_exact(buf).map_err(Into::into)
                 } else {
                     **limit = 0;
                     stream.read_exact(&mut buf[..remaining_limit])?;
-                    Err(stream::Error.into())
+                    Err(io::Error::from(ErrorKind::UnexpectedEof).into())
                 }
             }
         }
@@ -254,7 +279,7 @@ mod internal {
         fn try_refresh(&mut self) -> Result<bool> {
             let BorrowedStream { input, buf, remaining_limit, reached_eof } = match &mut self.stream {
                 Some(s) => s,
-                None => return Err(stream::Error.into()),
+                None => return Err(io::Error::from(ErrorKind::UnexpectedEof).into()),
             };
             let amnt = input.read(buf)?;
 
@@ -268,7 +293,7 @@ mod internal {
             Ok(refreshed)
         }
         fn refresh(&mut self) -> Result<()> {
-            self.try_refresh().and_then(|b| if b { Ok(()) } else { Err(stream::Error.into()) })
+            self.try_refresh().and_then(|b| if b { Ok(()) } else { Err(io::Error::from(ErrorKind::UnexpectedEof).into()) })
         }
         fn read_byte(&mut self) -> Result<u8> {
             let mut buf = [0u8; 1];
@@ -308,7 +333,7 @@ mod internal {
         }
         fn read_exact(&mut self, slice: &mut [u8]) -> Result<()> {
             if self.reached_end() {
-                return Err(stream::Error.into());
+                return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
             }
 
             let mut remaining_slice = self.read_buffer_partial(slice)?;
@@ -330,7 +355,7 @@ mod internal {
                             }
                         }
                     },
-                    None => Err(stream::Error.into())
+                    None => Err(io::Error::from(ErrorKind::UnexpectedEof).into())
                 }
             } else {
                 Ok(())
@@ -338,7 +363,7 @@ mod internal {
         }
         fn skip(&mut self, amnt: i32) -> Result<()> {
             if self.reached_end() {
-                return Err(stream::Error.into());
+                return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
             }
 
             let amnt_usize = amnt as usize;
@@ -353,22 +378,23 @@ mod internal {
                     Some(BorrowedStream { input, remaining_limit, .. }) => {
                         match (**remaining_limit).cmp(&0) {
                             Ordering::Less => {
-                                input.skip(remaining_amnt).map_err(Into::into)
+                                input.skip_exact(unsafe { Length::new_unchecked(remaining_amnt) }).map_err(Into::into)
                             },
-                            Ordering::Equal => Err(stream::Error.into()),
+                            Ordering::Equal => Err(io::Error::from(ErrorKind::UnexpectedEof).into()),
                             Ordering::Greater => {
                                 let remaining = **remaining_limit;
+                                let remaining_length = unsafe { Length::new_unchecked(remaining) };
                                 if remaining > remaining_amnt {
                                     **remaining_limit = 0;
-                                    input.skip(remaining).map_err(Into::into)
+                                    input.skip_exact(remaining_length).map_err(Into::into)
                                 } else {
                                     **remaining_limit = i32::wrapping_sub(**remaining_limit, remaining_amnt as i32);
-                                    input.skip(remaining_amnt).map_err(Into::into)
+                                    input.skip_exact(remaining_length).map_err(Into::into)
                                 }
                             }
                         }
                     },
-                    None => Err(stream::Error.into()),
+                    None => Err(io::Error::from(ErrorKind::UnexpectedEof).into()),
                 }
             }
         }
@@ -382,7 +408,7 @@ mod internal {
             self.shared_state
         }
 
-        fn push_limit(&mut self, limit: i32) -> result::Result<Option<i32>, stream::Error> {
+        fn push_limit(&mut self, limit: i32) -> io::Result<Option<i32>> {
             match &mut self.stream {
                 Some(BorrowedStream { remaining_limit, .. }) => {
                     if **remaining_limit < 0 {
@@ -391,7 +417,7 @@ mod internal {
                     } else {
                         let remaining = i32::wrapping_add(self.buffer.to_limit_len() as i32, **remaining_limit);
                         if remaining < limit {
-                            Err(stream::Error)
+                            Err(ErrorKind::UnexpectedEof.into())
                         } else {
                             **remaining_limit = unsafe { self.buffer.apply_partial_limit(limit) };
                             Ok(Some(i32::wrapping_sub(remaining, limit)))
@@ -401,7 +427,7 @@ mod internal {
                 None => {
                     if let Some(existing_limit) = self.buffer.remaining_limit() {
                         if existing_limit < limit {
-                            Err(stream::Error)
+                            Err(ErrorKind::UnexpectedEof.into())
                         } else {
                             let old = i32::wrapping_sub(existing_limit, limit);
                             unsafe { self.buffer.apply_limit(limit) };
@@ -412,7 +438,7 @@ mod internal {
                         unsafe {
                             match i32::try_from(limit_len) {
                                 Ok(end) if limit > end => {
-                                    Err(stream::Error)
+                                    Err(ErrorKind::UnexpectedEof.into())
                                 },
                                 _ => {
                                     self.buffer.apply_limit(limit);
@@ -596,14 +622,14 @@ pub enum Error {
     /// the tag was invalid in it's position
     InvalidTag(u32),
     /// An error occured while reading from the underlying `Read` object
-    StreamError(stream::Error),
+    IoError(io::Error),
     /// The input contained an invalid UTF8 string
     InvalidString(FromUtf8Error),
 }
 
-impl From<stream::Error> for Error {
-    fn from(value: stream::Error) -> Error {
-        Error::StreamError(value)
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Error {
+        Error::IoError(value)
     }
 }
 
@@ -620,17 +646,16 @@ impl Display for Error {
             Error::NegativeSize => write!(fmt, "the input contained a length delimited value which reported it had a negative size"),
             Error::RecursionLimitExceeded => write!(fmt, "the input contained a nested data structure that exceeded the recursion limit"),
             Error::InvalidTag(val) => write!(fmt, "the input contained an tag that was either invalid or was unexpected at this point in the input: {}", val),
-            Error::StreamError(_) => write!(fmt, "an error occured in the underlying input"),
+            Error::IoError(err) => write!(fmt, "an error occured in the underlying input: {}", err),
             Error::InvalidString(_) => write!(fmt, "the input contained an invalid UTF8 string")
         }
     }
 }
 
-#[cfg(feature = "std")]
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Error::StreamError(ref e) => Some(e),
+            Error::IoError(ref e) => Some(e),
             Error::InvalidString(ref e) => Some(e),
             _ => None,
         }
@@ -673,18 +698,18 @@ impl Reader for Slice<'_> {
         &mut self.state
     }
 
-    fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>> {
+    fn push_limit(&mut self, limit: i32) -> io::Result<Option<i32>> {
         let old = match self.buffer.remaining_limit() {
             Some(remaining) => {
                 if remaining < limit { // err out if the new limit goes beyond our current limit
-                    return Err(stream::Error);
+                    return Err(ErrorKind::UnexpectedEof.into());
                 }
 
                 Some(remaining - limit)
             },
             None => {
                 if self.buffer.to_end_len() < limit as usize {
-                    return Err(stream::Error);
+                    return Err(ErrorKind::UnexpectedEof.into());
                 }
 
                 None
@@ -752,7 +777,7 @@ impl Reader for Slice<'_> {
                     return Ok(result);
                 }
             }
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::UnexpectedEof).into())
         } else {
             let slice = unsafe { self.buffer.to_limit_as_slice() };
             for (i, &b) in slice.iter().enumerate() {
@@ -762,7 +787,7 @@ impl Reader for Slice<'_> {
                     return Ok(result);
                 }
             }
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::UnexpectedEof).into())
         }
     }
     fn read_varint64(&mut self) -> Result<u64> {
@@ -776,7 +801,7 @@ impl Reader for Slice<'_> {
                     return Ok(result);
                 }
             }
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::UnexpectedEof).into())
         } else {
             for (i, &b) in slice.iter().enumerate().take(10) {
                 result |= ((b & 0x7f) as u64) << (7 * i);
@@ -790,7 +815,7 @@ impl Reader for Slice<'_> {
     }
     fn read_bit32(&mut self) -> Result<u32> {
         self.buffer.try_limited_as_array()
-            .ok_or(Error::StreamError(stream::Error))
+            .ok_or(io::Error::from(ErrorKind::UnexpectedEof).into())
             .copied()
             .map(|arr| {
                 unsafe { self.buffer.advance(4); } // since we already got the array, we know we have at least 4 bytes
@@ -799,7 +824,7 @@ impl Reader for Slice<'_> {
     }
     fn read_bit64(&mut self) -> Result<u64> {
         self.buffer.try_limited_as_array()
-            .ok_or(Error::StreamError(stream::Error))
+            .ok_or(io::Error::from(ErrorKind::UnexpectedEof).into())
             .copied()
             .map(|arr| {
                 unsafe { self.buffer.advance(8); } // since we already got the array, we know we have at least 8 bytes
@@ -811,7 +836,7 @@ impl Reader for Slice<'_> {
         match len {
             len if len < 0 => Err(Error::NegativeSize),
             0 => Ok(ByteString::new(0)),
-            len if len as usize > self.buffer.to_limit_len() => Err(stream::Error.into()),
+            len if len as usize > self.buffer.to_limit_len() => Err(io::Error::from(ErrorKind::UnexpectedEof).into()),
             len => {
                 let len = len as usize;
                 let mut bytes = B::new(len);
@@ -840,7 +865,7 @@ impl Reader for Slice<'_> {
                     return Ok(());
                 }
             }
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::UnexpectedEof).into())
         }
     }
     fn skip_bit32(&mut self) -> Result<()> {
@@ -848,7 +873,7 @@ impl Reader for Slice<'_> {
             unsafe { self.buffer.advance(4); }
             Ok(())
         } else {
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::UnexpectedEof).into())
         }
     }
     fn skip_bit64(&mut self) -> Result<()> {
@@ -856,7 +881,7 @@ impl Reader for Slice<'_> {
             unsafe { self.buffer.advance(8); }
             Ok(())
         } else {
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::UnexpectedEof).into())
         }
     }
     fn skip_length_delimited(&mut self) -> Result<()> {
@@ -869,7 +894,7 @@ impl Reader for Slice<'_> {
                 unsafe { self.buffer.advance(len); }
                 Ok(())
             } else {
-                Err(stream::Error.into())
+                Err(io::Error::from(ErrorKind::UnexpectedEof).into())
             }
         }
     }
@@ -902,9 +927,9 @@ pub struct Stream<T> {
     state: SharedState,
 }
 
-impl<T: Read> Stream<T> {
+impl<T: Read + Skip> Stream<T> {
     fn new(input: T, cap: usize) -> Self {
-        let buf = alloc::vec![0; cap].into_boxed_slice();
+        let buf = vec![0; cap].into_boxed_slice();
         let buffer = Buffer::from_slice(&buf[0..0]);
 
         Stream {
@@ -935,7 +960,7 @@ impl<T: Read> Stream<T> {
         Ok(refreshed)
     }
     fn refresh(&mut self) -> Result<()> {
-        self.try_refresh().and_then(|b| b.then_some(()).ok_or(Error::StreamError(stream::Error)))
+        self.try_refresh().and_then(|b| b.then_some(()).ok_or(io::Error::from(ErrorKind::UnexpectedEof).into()))
     }
     fn read_buffer_partial<'a>(&mut self, slice: &'a mut [u8]) -> Result<&'a mut [u8]> {
         // check if we reached the end of the buffer
@@ -948,7 +973,7 @@ impl<T: Read> Stream<T> {
         if self.remaining_limit == 0 {
             if limit_len < slice.len() {
                 unsafe { self.buffer.advance(limit_len); }
-                return Err(stream::Error.into());
+                return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
             }
 
             unsafe {
@@ -974,20 +999,20 @@ impl<T: Read> Stream<T> {
         } else {
             let remaining_limit = self.remaining_limit as usize;
             if remaining_limit == 0 {
-                Err(stream::Error.into())
+                Err(io::Error::from(ErrorKind::UnexpectedEof).into())
             } else if remaining_limit >= buf.len() {
                 self.remaining_limit = i32::wrapping_sub(self.remaining_limit, buf.len() as i32);
                 self.input.read_exact(buf).map_err(Into::into)
             } else {
                 self.remaining_limit = 0;
                 self.input.read_exact(&mut buf[..remaining_limit])?;
-                Err(stream::Error.into())
+                Err(io::Error::from(ErrorKind::UnexpectedEof).into())
             }
         }
     }
     fn read_exact(&mut self, slice: &mut [u8]) -> Result<()> {
         if self.reached_end() {
-            return Err(stream::Error.into());
+            return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
         }
 
         let mut remaining_slice = self.read_buffer_partial(slice)?;
@@ -1014,7 +1039,7 @@ impl<T: Read> Stream<T> {
     fn skip(&mut self, amnt: i32) -> Result<()> {
         let amnt_usize = amnt as usize;
         if self.reached_end() {
-            return Err(stream::Error.into());
+            return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
         }
 
         let limit_buf_len = self.buffer.to_limit_len();
@@ -1026,17 +1051,18 @@ impl<T: Read> Stream<T> {
             let remaining_amnt = amnt - limit_buf_len as i32;
             match self.remaining_limit.cmp(&0) {
                 Ordering::Less => {
-                    self.input.skip(remaining_amnt).map_err(Into::into)
+                    self.input.skip_exact(unsafe { Length::new_unchecked(remaining_amnt) }).map_err(Into::into)
                 },
-                Ordering::Equal => Err(stream::Error.into()),
+                Ordering::Equal => Err(io::Error::from(ErrorKind::UnexpectedEof).into()),
                 Ordering::Greater => {
                     let remaining_limit = self.remaining_limit;
+                    let remaining_length = unsafe { Length::new_unchecked(remaining_limit) };
                     if remaining_limit > remaining_amnt {
                         self.remaining_limit = 0;
-                        self.input.skip(remaining_limit).map_err(Into::into)
+                        self.input.skip_exact(remaining_length).map_err(Into::into)
                     } else {
                         self.remaining_limit = i32::wrapping_sub(self.remaining_limit, remaining_amnt as i32);
-                        self.input.skip(remaining_amnt).map_err(Into::into)
+                        self.input.skip_exact(remaining_length).map_err(Into::into)
                     }
                 }
             }
@@ -1088,13 +1114,13 @@ impl<T: Read> Reader for Stream<T> {
         &mut self.state
     }
 
-    fn push_limit(&mut self, limit: i32) -> stream::Result<Option<i32>> {
+    fn push_limit(&mut self, limit: i32) -> io::Result<Option<i32>> {
         let old = match self.remaining_limit() {
             Some(remaining) => {
                 // if we have some existing limit, check ahead of time to
                 // make sure we don't extend behind the existing limit
                 if remaining < limit {
-                    return Err(stream::Error)
+                    return Err(ErrorKind::UnexpectedEof.into())
                 }
 
                 Some(remaining - limit)
@@ -1626,7 +1652,7 @@ impl<T: Input> CodedReader<T> {
                                 Some(tag) if tag == end => break Ok(()),
                                 Some(tag) if tag.wire_type() == WireType::EndGroup => return Err(Error::InvalidTag(tag.get())),
                                 Some(_) => s.skip()?,
-                                None => return Err(Error::StreamError(stream::Error))
+                                None => return Err(io::Error::from(ErrorKind::UnexpectedEof).into())
                             }
                         }
                     })?
@@ -1694,8 +1720,8 @@ impl<T: Input> CodedReader<T> {
 
 #[cfg(test)]
 mod test {
-    use alloc::borrow::BorrowMut;
     use crate::io::read::{Any, Input, Builder, CodedReader};
+    use std::borrow::BorrowMut;
 
     pub trait ReaderInput<'a> {
         type Reader: Input + 'a;
@@ -1725,9 +1751,9 @@ mod test {
     }
 
     mod actions {
-        use core::fmt::Debug;
-        use core::marker::PhantomData;
-        use crate::io::{Tag, ByteString, stream, read::{self, Input, CodedReader, Error}};
+        use std::fmt::Debug;
+        use std::marker::PhantomData;
+        use crate::io::{Tag, ByteString, read::{self, Input, CodedReader, Error}};
 
         pub trait Action<T: Input> {
             fn run(self, reader: &mut CodedReader<T>);
@@ -1740,7 +1766,7 @@ mod test {
         }
 
         pub mod read_tag {
-            use core::convert::TryFrom;
+            use std::convert::TryFrom;
             use crate::io::{Tag, read::{Input, CodedReader}};
             use super::Action;
 
@@ -1816,8 +1842,8 @@ mod test {
         pub fn value<V: PartialEq + Debug, E: Debug>(value: V) -> impl FnOnce(Result<V, E>) {
             move |v| assert!(matches!(&v, Ok(v) if v == &value), "expected `{:?}`, got `{:?}`", value, v)
         }
-        pub fn stream_error<T: Debug>(r: Result<T, Error>) {
-            assert!(matches!(r, Err(Error::StreamError(stream::Error))), "expected `{:?}`, got `{:?}`", Err::<T, _>(Error::StreamError(stream::Error)), r)
+        pub fn io_error<T: Debug>(r: Result<T, Error>) {
+            assert!(matches!(r, Err(Error::IoError(_))), "expected `{:?}`, got `{:?}`", "Error::IoError(_)", r)
         }
         pub fn malformed_varint<T: Debug>(r: Result<T, Error>) {
             assert!(matches!(r, Err(Error::MalformedVarint)), "expected `{:?}`, got `{:?}`", Err::<T, _>(Error::MalformedVarint), r)
@@ -1883,22 +1909,22 @@ mod test {
              .then(a::read_tag::none());
         },
         (read_truncated_tag | read_truncated_tag_any) = [128] => |r| {
-            r.then(a::try_read_tag.with(a::stream_error));
+            r.then(a::try_read_tag.with(a::io_error));
         },
         (read_truncated_9byte_tag | read_truncated_9byte_tag_any) = [128u8; 9] => |r| {
-            r.then(a::try_read_tag.with(a::stream_error));
+            r.then(a::try_read_tag.with(a::io_error));
         },
         (read_malformed_tag | read_malformed_tag_any) = [128u8; 10] => |r| {
             r.then(a::try_read_tag.with(a::malformed_varint));
         },
         (read_truncated_varint32_empty | read_truncated_varint32_empty_any) = [] => |r| {
-            r.then(a::read_varint32.with(a::stream_error));
+            r.then(a::read_varint32.with(a::io_error));
         },
         (read_truncated_varint32_5byte | read_truncated_varint32_5byte_any) = [128u8; 5] => |r| {
-            r.then(a::read_varint32.with(a::stream_error));
+            r.then(a::read_varint32.with(a::io_error));
         },
         (read_truncated_varint32_9byte | read_truncated_varint32_9byte_any) = [128u8; 9] => |r| {
-            r.then(a::read_varint32.with(a::stream_error));
+            r.then(a::read_varint32.with(a::io_error));
         },
         (read_malformed_varint32 | read_malformed_varint32_any) = [128u8; 10] => |r| {
             r.then(a::read_varint32.with(a::malformed_varint));
@@ -1916,10 +1942,10 @@ mod test {
              .then(a::read_tag::none());
         },
         (read_truncated_varint64_empty | read_truncated_varint64_empty_any) = [] => |r| {
-            r.then(a::read_varint64.with(a::stream_error));
+            r.then(a::read_varint64.with(a::io_error));
         },
         (read_truncated_varint64_9byte | read_truncated_varint64_9byte_any) = [128u8; 9] => |r| {
-            r.then(a::read_varint64.with(a::stream_error));
+            r.then(a::read_varint64.with(a::io_error));
         },
         (read_malformed_varint64 | read_malformed_varint64_any) = [128u8; 10] => |r| {
             r.then(a::read_varint64.with(a::malformed_varint));
@@ -1933,20 +1959,20 @@ mod test {
              .then(a::read_tag::none());
         },
         (read_truncated_bit32 | read_truncated_bit32_any) = [] => |r| {
-            r.then(a::read_bit32.with(a::stream_error));
+            r.then(a::read_bit32.with(a::io_error));
         },
         (read_truncated_bit32_3byte | read_truncated_bit32_3byte_any) = [0u8; 3] => |r| {
-            r.then(a::read_bit32.with(a::stream_error));
+            r.then(a::read_bit32.with(a::io_error));
         },
         (read_bit32 | read_bit32_any) = [0x78, 0x56, 0x34, 0x12] => |r| {
             r.then(a::read_bit32.with(a::value(0x12345678u32)))
              .then(a::read_tag::none());
         },
         (read_truncated_bit64 | read_truncated_bit64_any) = [] => |r| {
-            r.then(a::read_bit64.with(a::stream_error));
+            r.then(a::read_bit64.with(a::io_error));
         },
         (read_truncated_bit64_7byte | read_truncated_bit64_7byte_any) = [0u8; 7] => |r| {
-            r.then(a::read_bit64.with(a::stream_error));
+            r.then(a::read_bit64.with(a::io_error));
         },
         (read_bit64 | read_bit64_any) = [0xEF, 0xCD, 0xAB, 0x90, 0x78, 0x56, 0x34, 0x12] => |r| {
             r.then(a::read_bit64.with(a::value(0x1234567890ABCDEFu64)))
@@ -1955,19 +1981,17 @@ mod test {
         (read_length_delimited | read_length_delimited_any) = 
             [12, b'H', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l', b'd', b'!'] 
                 => |r| {
-            use alloc::borrow::ToOwned;
-
-            r.then(a::read_length_delimited::<alloc::vec::Vec<u8>, _>
+            r.then(a::read_length_delimited::<Vec<u8>, _>
                 .with(a::value(b"Hello world!".as_ref().to_owned())))
              .then(a::read_tag::none());
         },
         (read_length_delimited_truncated | read_length_delimited_truncated_any) = [12] => |r| {
-            r.then(a::read_length_delimited::<alloc::vec::Vec<u8>, _>.with(a::stream_error));
+            r.then(a::read_length_delimited::<Vec<u8>, _>.with(a::io_error));
         },
         (read_length_delimited_byte_truncated | read_length_delimited_byte_truncated_any) =
             [12, b'H', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l', b'd']
                 => |r| {
-            r.then(a::read_length_delimited::<alloc::vec::Vec<u8>, _>.with(a::stream_error));
+            r.then(a::read_length_delimited::<Vec<u8>, _>.with(a::io_error));
         },
         (skip_varint | skip_varint_any) = [8, 128, 128, 128, 128, 128, 128, 128, 128, 128, 0] => |r| {
             r.then(a::read_tag::value(8))
@@ -1976,11 +2000,11 @@ mod test {
         },
         (skip_varint_truncated | skip_varint_truncated_any) = [8] => |r| {
             r.then(a::read_tag::value(8))
-             .then(a::skip.with(a::stream_error));
+             .then(a::skip.with(a::io_error));
         },
         (skip_varint_9byte_truncated | skip_varint_9byte_truncated_any) = [8, 128, 128, 128, 128, 128, 128, 128, 128, 128] => |r| {
             r.then(a::read_tag::value(8))
-             .then(a::skip.with(a::stream_error));
+             .then(a::skip.with(a::io_error));
         },
         (skip_varint_malformed | skip_varint_malformed_any) = [8, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128] => |r| {
             r.then(a::read_tag::value(8))
@@ -1993,11 +2017,11 @@ mod test {
         },
         (skip_bit32_truncated | skip_bit32_truncated_any) = [13] => |r| {
             r.then(a::read_tag::value(13))
-             .then(a::skip.with(a::stream_error));
+             .then(a::skip.with(a::io_error));
         },
         (skip_bit32_3byte_truncated | skip_bit32_3byte_truncated_any) = [13, 0, 0, 0] => |r| {
             r.then(a::read_tag::value(13))
-             .then(a::skip.with(a::stream_error));
+             .then(a::skip.with(a::io_error));
         },
         (skip_bit64 | skip_bit64_any) = [9, 0, 0, 0, 0, 0, 0, 0, 0] => |r| {
             r.then(a::read_tag::value(9))
@@ -2006,11 +2030,11 @@ mod test {
         },
         (skip_bit64_truncated | skip_bit64_truncated_any) = [9] => |r| {
             r.then(a::read_tag::value(9))
-             .then(a::skip.with(a::stream_error));
+             .then(a::skip.with(a::io_error));
         },
         (skip_bit64_7byte_truncated | skip_bit64_7byte_truncated_any) = [9, 0, 0, 0, 0, 0, 0, 0] => |r| {
             r.then(a::read_tag::value(9))
-             .then(a::skip.with(a::stream_error));
+             .then(a::skip.with(a::io_error));
         },
         (skip_length_delimited | skip_length_delimited_any) = [10, 2, 0, 0] => |r| {
             r.then(a::read_tag::value(10))
@@ -2018,11 +2042,11 @@ mod test {
         },
         (skip_length_delimited_truncated | skip_length_delimited_truncated_any) = [10, 2] => |r| {
             r.then(a::read_tag::value(10))
-             .then(a::skip.with(a::stream_error));
+             .then(a::skip.with(a::io_error));
         },
         (skip_length_delimited_truncated_byte | skip_length_delimited_truncated_byte_any) = [10, 2, 0] => |r| {
             r.then(a::read_tag::value(10))
-             .then(a::skip.with(a::stream_error));
+             .then(a::skip.with(a::io_error));
         },
         (skip_group | skip_group_any) = [11, 16, 0, 12] => |r| {
             r.then(a::read_tag::value(11))
@@ -2050,7 +2074,7 @@ mod test {
              .then(a::read_limited(|r| {
                 r.then(a::read_tag::value(10));
                 r.read_varint32()
-              }).with(a::stream_error));
+              }).with(a::io_error));
         },
         (read_negative_delimited_field | read_negative_delimited_field_any) = [10, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1] => |r| {
             r.then(a::read_tag::value(10))

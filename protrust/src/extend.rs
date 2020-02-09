@@ -1,26 +1,24 @@
 //! Types and traits for working with proto2 extensions
 
-use alloc::borrow::{Borrow, Cow, ToOwned};
-use alloc::boxed::Box;
-use core::any::TypeId;
-use core::fmt::{self, Debug};
-use core::marker::PhantomData;
-use core::mem;
 use crate::Mergable;
 use crate::collections::{RepeatedField, FieldSet, TryRead};
 use crate::internal::Sealed;
 use crate::io::{read::{self, Input}, write::{self, Output}, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
 use crate::raw::{ValueType, Value, Packable, Packed};
-use hashbrown::{HashMap, hash_map::{self, DefaultHashBuilder}};
+use std::any::TypeId;
+use std::borrow::{Borrow, Cow, ToOwned};
+use std::collections::{HashMap, hash_map};
+use std::fmt::{self, Debug};
+use std::marker::PhantomData;
+use std::mem;
 
 mod internal {
-    use alloc::boxed::Box;
-    use core::any::{Any, TypeId};
-    use core::fmt::{self, Debug, Formatter};
     use crate::{Mergable, merge};
     use crate::collections::{RepeatedField, RepeatedValue};
     use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
     use crate::raw::{ValueType, Value, Packable, Packed};
+    use std::any::{Any, TypeId};
+    use std::fmt::{self, Debug, Formatter};
     use super::ExtendableMessage;
 
     pub trait ExtensionIdentifier: Sync {
@@ -548,7 +546,7 @@ impl<T: ExtendableMessage + 'static> ExtensionSet<T> {
     /// Returns if the registry contained in this set is equal to the provided registry
     pub fn has_registry(&self, registry: Option<&'static ExtensionRegistry>) -> bool {
         match (self.registry(), registry) {
-            (Some(r), Some(o)) => core::ptr::eq(r, o),
+            (Some(r), Some(o)) => std::ptr::eq(r, o),
             (None, None) => true,
             _ => false
         }
@@ -714,7 +712,7 @@ impl<'a, 'e, T: 'e + ExtensionType> Field<'a, 'e, T> {
 /// Represents an occupied field in an extension set
 pub struct OccupiedField<'a, 'e, T: 'e> {
     extension: &'e T,
-    entry: hash_map::OccupiedEntry<'a, FieldNumber, Box<dyn AnyExtension>, DefaultHashBuilder>,
+    entry: hash_map::OccupiedEntry<'a, FieldNumber, Box<dyn AnyExtension>>,
 }
 
 impl<'a, 'e, T: 'e + ExtensionType> OccupiedField<'a, 'e, T> {
@@ -750,14 +748,14 @@ impl<'a, 'e, T: 'e + ExtensionType> OccupiedField<'a, 'e, T> {
 
     /// Sets the value of the field and returns the field's old value
     pub fn insert(&mut self, value: T::Value) -> T::Value {
-        core::mem::replace(self.get_mut(), value)
+        std::mem::replace(self.get_mut(), value)
     }
 }
 
 /// Represents a field without a value in the set
 pub struct VacantField<'a, 'e, T: 'e> {
     extension: &'e T,
-    entry: hash_map::VacantEntry<'a, FieldNumber, Box<dyn AnyExtension>, DefaultHashBuilder>,
+    entry: hash_map::VacantEntry<'a, FieldNumber, Box<dyn AnyExtension>>,
 }
 
 impl<'a, 'e, T: 'e + ExtensionType> VacantField<'a, 'e, T> {

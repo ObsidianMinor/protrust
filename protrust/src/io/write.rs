@@ -1,26 +1,26 @@
 //! Defines the `CodedWriter`, a writer for writing protobuf encoded values to streams.
 
-use alloc::boxed::Box;
-use core::convert::TryFrom;
-use core::fmt::{self, Display, Formatter};
-use core::marker::PhantomData;
-use core::ops::Range;
-use core::ptr::{self, NonNull};
-use core::slice;
 use crate::collections::{RepeatedValue, FieldSet};
-use crate::io::{FieldNumber, WireType, Tag, Length, DEFAULT_BUF_SIZE, stream::{self, Write}};
+use crate::io::{FieldNumber, WireType, Tag, Length, DEFAULT_BUF_SIZE};
 use crate::raw::Value;
+use std::convert::TryFrom;
+use std::error;
+use std::fmt::{self, Display, Formatter};
+use std::marker::PhantomData;
+use std::io::{self, Write, ErrorKind};
+use std::mem::ManuallyDrop;
+use std::ops::Range;
+use std::ptr::{self, NonNull};
+use std::slice;
 use super::{raw_varint32_size, raw_varint64_size};
 
-#[cfg(feature = "std")]
-use std::error;
-
 mod internal {
-    use core::convert::TryFrom;
-    use core::ptr::{self, NonNull};
-    use core::slice;
     use crate::internal::Sealed;
-    use crate::io::{raw_varint32_size, raw_varint64_size, stream::{self, Write}};
+    use crate::io::{raw_varint32_size, raw_varint64_size};
+    use std::convert::TryFrom;
+    use std::io::{self, Write, ErrorKind};
+    use std::ptr::{self, NonNull};
+    use std::slice;
     use super::{Result, Error, write_varint32_unchecked, write_varint64_unchecked, write_bytes_unchecked};
 
     pub trait Writer {
@@ -59,7 +59,7 @@ mod internal {
         }
         fn flush(&mut self) -> Result {
             let slice = unsafe { slice::from_raw_parts(self.start, self.buffered()) };
-            self.output.write(slice)?;
+            self.output.write_all(slice)?;
             self.clear();
             Ok(())
         }
@@ -71,7 +71,7 @@ mod internal {
             if len >= self.capacity() {
                 let mut buf = [0; 5];
                 unsafe { write_varint32_unchecked(value, &mut buf.as_mut_ptr()); }
-                self.output.write(&buf[..len])?;
+                self.output.write_all(&buf[..len])?;
             } else {
                 unsafe { write_varint32_unchecked(value, &mut self.current); }
             }
@@ -84,7 +84,7 @@ mod internal {
             if len >= self.capacity() {
                 let mut buf = [0; 10];
                 unsafe { write_varint64_unchecked(value, &mut buf.as_mut_ptr()); }
-                self.output.write(&buf[..len])?;
+                self.output.write_all(&buf[..len])?;
             } else {
                 unsafe { write_varint64_unchecked(value, &mut self.current); }
             }
@@ -96,7 +96,7 @@ mod internal {
                 self.flush()?;
             }
             if value.len() >= self.capacity() {
-                self.output.write(&value)?;
+                self.output.write_all(&value)?;
             } else {
                 unsafe { write_bytes_unchecked(&value, &mut self.current); }
             }
@@ -108,7 +108,7 @@ mod internal {
                 self.flush()?;
             }
             if value.len() >= self.capacity() {
-                self.output.write(&value)?;
+                self.output.write_all(&value)?;
             } else {
                 unsafe { write_bytes_unchecked(&value, &mut self.current); }
             }
@@ -120,7 +120,7 @@ mod internal {
                 self.flush()?;
             }
             if len >= self.capacity() {
-                self.output.write(value)?;
+                self.output.write_all(value)?;
             } else {
                 unsafe { write_bytes_unchecked(value, &mut self.current); }
             }
@@ -170,7 +170,7 @@ mod internal {
             } else if let Some(mut buffer) = self.as_borrowed_stream() {
                 buffer.write_varint32(value, len)
             } else {
-                Err(stream::Error.into())
+                Err(io::Error::from(ErrorKind::WriteZero).into())
             }
         }
         fn write_varint64(&mut self, value: u64) -> Result {
@@ -181,7 +181,7 @@ mod internal {
             } else if let Some(mut buffer) = self.as_borrowed_stream() {
                 buffer.write_varint64(value, len)
             } else {
-                Err(stream::Error.into())
+                Err(io::Error::from(ErrorKind::WriteZero).into())
             }
         }
         fn write_bit32(&mut self, value: u32) -> Result {
@@ -192,7 +192,7 @@ mod internal {
             } else if let Some(mut buffer) = self.as_borrowed_stream() {
                 buffer.write_bit32(value)
             } else {
-                Err(stream::Error.into())
+                Err(io::Error::from(ErrorKind::WriteZero).into())
             }
         }
         fn write_bit64(&mut self, value: u64) -> Result {
@@ -203,7 +203,7 @@ mod internal {
             } else if let Some(mut buffer) = self.as_borrowed_stream() {
                 buffer.write_bit64(value)
             } else {
-                Err(stream::Error.into())
+                Err(io::Error::from(ErrorKind::WriteZero).into())
             }
         }
         fn write_length_delimited(&mut self, value: &[u8]) -> Result {
@@ -216,7 +216,7 @@ mod internal {
             } else if let Some(mut buffer) = self.as_borrowed_stream() {
                 buffer.write_bytes(value)
             } else {
-                Err(stream::Error.into())
+                Err(io::Error::from(ErrorKind::WriteZero).into())
             }
         }
         #[allow(clippy::map_clone)]
@@ -243,7 +243,7 @@ pub enum Error {
     /// An error occured while writing data to the output.
     /// For slice outputs, this is used to indicate if
     /// not all data could be written to the slice.
-    IoError(stream::Error)
+    IoError(io::Error)
 }
 
 impl Display for Error {
@@ -255,7 +255,6 @@ impl Display for Error {
     }
 }
 
-#[cfg(feature = "std")]
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
@@ -265,14 +264,14 @@ impl error::Error for Error {
     }
 }
 
-impl From<stream::Error> for Error {
-    fn from(e: stream::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
         Self::IoError(e)
     }
 }
 
 /// A result for a [`CodedWriter`](struct.CodedWriter.html) read operation
-pub type Result = core::result::Result<(), Error>;
+pub type Result = std::result::Result<(), Error>;
 
 /// A trait representing types that can be used as outputs in CodedOutput
 pub trait Output: Writer { }
@@ -412,7 +411,7 @@ impl Writer for Slice<'_> {
             debug_assert!(self.start <= self.end);
             Ok(())
         } else {
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::WriteZero).into())
         }
     }
     fn write_varint64(&mut self, value: u64) -> Result {
@@ -424,7 +423,7 @@ impl Writer for Slice<'_> {
             debug_assert!(self.start <= self.end);
             Ok(())
         } else {
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::WriteZero).into())
         }
     }
     fn write_bit32(&mut self, value: u32) -> Result {
@@ -437,7 +436,7 @@ impl Writer for Slice<'_> {
             debug_assert!(self.start <= self.end);
             Ok(())
         } else {
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::WriteZero).into())
         }
     }
     fn write_bit64(&mut self, value: u64) -> Result {
@@ -450,7 +449,7 @@ impl Writer for Slice<'_> {
             debug_assert!(self.start <= self.end);
             Ok(())
         } else {
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::WriteZero).into())
         }
     }
     fn write_length_delimited(&mut self, value: &[u8]) -> Result {
@@ -465,7 +464,7 @@ impl Writer for Slice<'_> {
             debug_assert!(self.start <= self.end);
             Ok(())
         } else {
-            Err(stream::Error.into())
+            Err(io::Error::from(ErrorKind::WriteZero).into())
         }
     }
 
@@ -479,18 +478,24 @@ impl Writer for Slice<'_> {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum DropFlag {
+    Moved,
+    Owned,
+}
+
 /// A buffered stream output
-pub struct Stream<T> {
-    output: T,
+pub struct Stream<T: Write> {
+    output: ManuallyDrop<T>,
     start: NonNull<u8>,
     current: *mut u8,
     end: NonNull<u8>,
 }
 impl<T: Write> Stream<T> {
     fn with_capacity(cap: usize, output: T) -> Self {
-        let Range { start, end } = Box::leak(alloc::vec![0; cap].into_boxed_slice()).as_mut_ptr_range();
+        let Range { start, end } = Box::leak(vec![0; cap].into_boxed_slice()).as_mut_ptr_range();
         Self {
-            output,
+            output: ManuallyDrop::new(output),
             start: unsafe { NonNull::new_unchecked(start) },
             current: start,
             end: unsafe { NonNull::new_unchecked(end) },
@@ -514,12 +519,23 @@ impl<T: Write> Stream<T> {
     }
     fn flush(&mut self) -> Result {
         let slice = unsafe { slice::from_raw_parts(self.start.as_ptr() as _, self.buffered()) };
-        self.output.write(slice)?;
+        self.output.write_all(slice)?;
         self.clear();
         Ok(())
     }
-    fn into_inner(self) -> T {
-        self.output
+    fn into_inner(mut self) -> T {
+        let output = unsafe { ManuallyDrop::take(&mut self.output) };
+        unsafe { self.drop_inner(DropFlag::Moved) };
+        std::mem::forget(self);
+        output
+    }
+    #[inline]
+    unsafe fn drop_inner(&mut self, flag: DropFlag) {
+        let raw_slice = slice::from_raw_parts_mut(self.start.as_ptr(), self.capacity());
+        drop(Box::from_raw(raw_slice));
+        if flag == DropFlag::Owned {
+            ManuallyDrop::drop(&mut self.output);
+        }
     }
 }
 impl<T: Write> Writer for Stream<T> {
@@ -531,7 +547,7 @@ impl<T: Write> Writer for Stream<T> {
         if len >= self.capacity() {
             let mut buf = [0; 5];
             unsafe { write_varint32_unchecked(value, &mut buf.as_mut_ptr()); }
-            self.output.write(&buf[..len])?;
+            self.output.write_all(&buf[..len])?;
         } else {
             unsafe { write_varint32_unchecked(value, &mut self.current); }
         }
@@ -545,7 +561,7 @@ impl<T: Write> Writer for Stream<T> {
         if len >= self.capacity() {
             let mut buf = [0; 10];
             unsafe { write_varint64_unchecked(value, &mut buf.as_mut_ptr()); }
-            self.output.write(&buf[..len])?;
+            self.output.write_all(&buf[..len])?;
         } else {
             unsafe { write_varint64_unchecked(value, &mut self.current); }
         }
@@ -557,7 +573,7 @@ impl<T: Write> Writer for Stream<T> {
             self.flush()?;
         }
         if value.len() >= self.capacity() {
-            self.output.write(&value)?;
+            self.output.write_all(&value)?;
         } else {
             unsafe { write_bytes_unchecked(&value, &mut self.current); }
         }
@@ -569,7 +585,7 @@ impl<T: Write> Writer for Stream<T> {
             self.flush()?;
         }
         if value.len() >= self.capacity() {
-            self.output.write(&value)?;
+            self.output.write_all(&value)?;
         } else {
             unsafe { write_bytes_unchecked(&value, &mut self.current); }
         }
@@ -583,7 +599,7 @@ impl<T: Write> Writer for Stream<T> {
             self.flush()?;
         }
         if len >= self.capacity() {
-            self.output.write(value)?;
+            self.output.write_all(value)?;
         } else {
             unsafe { write_bytes_unchecked(value, &mut self.current); }
         }
@@ -592,11 +608,16 @@ impl<T: Write> Writer for Stream<T> {
 
     fn as_any(&mut self) -> Any {
         Any {
-            stream: Some(&mut self.output),
+            stream: Some(&mut *self.output),
             start: Some(self.start),
             current: &mut self.current,
             end: Some(self.end),
         }
+    }
+}
+impl<T: Write> Drop for Stream<T> {
+    fn drop(&mut self) {
+        unsafe { self.drop_inner(DropFlag::Owned) }
     }
 }
 
@@ -753,7 +774,7 @@ mod test {
         ($(($ti:ident | $tia:ident | size: $s:expr) = |$f:ident| $t:block => $p:pat $(if $pe:expr)?),+) => {
             $(
                 pub fn $ti<T>() where for<'a> T: WriterOutput<'a> {
-                    let mut output = alloc::vec![0; $s].into_boxed_slice();
+                    let mut output = vec![0; $s].into_boxed_slice();
 
                     let result = 
                         match T::run(&mut output, |$f| $t) {
@@ -768,7 +789,7 @@ mod test {
                 }
 
                 pub fn $tia<T>() where for<'a> T: WriterOutput<'a> {
-                    let mut output = alloc::vec![0; $s].into_boxed_slice();
+                    let mut output = vec![0; $s].into_boxed_slice();
 
                     let result = 
                         match T::run_any(&mut output, |$f| $t) {
