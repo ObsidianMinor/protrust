@@ -31,7 +31,7 @@ void RustModGenerator::Generate(const std::vector<const FileDescriptor*>& files,
         const FileDescriptor* file = files[i];
         this->GenerateFileMod(file, mod_printer);
 
-        std::string file_path = GetModPath(file, "protrust");
+        std::string file_path = GetOutputFilePath(file, "protrust");
         io::ZeroCopyOutputStream* file_stream = context->Open(file_path);
         io::Printer file_printer(file_stream, '$');
 
@@ -43,26 +43,37 @@ void RustModGenerator::Generate(const std::vector<const FileDescriptor*>& files,
 void RustModGenerator::GenerateFileMod(const FileDescriptor* file, io::Printer& printer) {
     std::string file_mod = GetFileModName(file);
     printer.Print(
-        "#[path = \".\"]\n"
+        "#[path = \"$file_dir$\"]\n"
         "pub mod $file_mod$ {\n",
+        "file_dir", GetFileDirPath(file),
         "file_mod", file_mod
     );
     printer.Indent();
     printer.Print(
+        "pub(self) use super::globals as __globals;\n"
         // re-use the current module as file, allowing code-gen to continue re-using that ident at any point in the module
-        "pub(self) use super::$file_mod$ as file;"
+        "pub(self) use super::$file_mod$ as __file;\n"
         // re-use the pool and extension registry so plugins can refer to their accessors through file::pool and file::registry
-        "pub(self) use super::pool;"
-        "pub(self) use super::registry;",
         "file_mod", file_mod
     );
+
+    printer.Print("pub(self) mod __imports {\n");
+    printer.Indent();
+
+    for (int i = 0; i < file->dependency_count(); i++) {
+        const FileDescriptor* dependency = file->dependency(i);
+        printer.Print("pub(super) use super::super::$import$;\n", "import", GetFileModName(dependency));
+    }
+
+    printer.Outdent();
+    printer.Print("}\n\n");
+
     printer.Print(
-        "#[path = \"$path$\"]\n"
+        "#[path = \"protrust.rs\"]\n"
         "mod protrust;\n"
         "\n"
         "pub use self::protrust::*;\n"
-        "\n",
-        "path", GetModPath(file, "protrust")
+        "\n"
     );
 
     const std::vector<std::string>& imports = this->options().imports;
@@ -70,11 +81,10 @@ void RustModGenerator::GenerateFileMod(const FileDescriptor* file, io::Printer& 
         const std::string& import = imports[i];
         printer.Print(
             "\n"
-            "#[path = \"$import_path$\"]\n"
+            "#[path = \"$import$.rs\"]\n"
             "mod $import$;\n"
             "\n"
             "pub use self::$import$::*;\n",
-            "import_path", GetModPath(file, import.data()),
             "import", import
         );
     }
