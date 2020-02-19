@@ -1,6 +1,6 @@
 //! Defines collection types used by generated code for repeated and map fields
 
-use crate::{Mergable, internal::Sealed};
+use crate::{Initializable, is_initialized, Mergable, internal::Sealed};
 use crate::io::{self, read, write, WireType, FieldNumber, Tag, LengthBuilder, Length, CodedReader, CodedWriter, Input, Output};
 use crate::raw::{self, Value, Packable, Packed};
 use std::convert::TryInto;
@@ -9,7 +9,7 @@ use std::hash::Hash;
 pub mod unknown_fields;
 
 /// A type of value that writes and reads repeated values on the wire, a common trait unifying repeated and map fields.
-pub trait RepeatedValue<T>: Sealed {
+pub trait RepeatedValue<T>: Initializable + Sealed {
     /// Gets the wire type of tags in this field.
     const WIRE_TYPE: WireType;
 
@@ -19,8 +19,6 @@ pub trait RepeatedValue<T>: Sealed {
     fn calculate_size(&self, builder: LengthBuilder, num: FieldNumber) -> Option<LengthBuilder>;
     /// Writes the value to the coded writer. This takes a field number to build the tag required for each field.
     fn write_to<U: Output>(&self, output: &mut CodedWriter<U>, num: FieldNumber) -> write::Result;
-    /// Returns a bool indicating whether all the values in the field are initialized
-    fn is_initialized(&self) -> bool;
 }
 
 /// A set of fields. This unifies unknown fields, extension fields, and any other future field set types
@@ -31,8 +29,6 @@ pub trait FieldSet: Sealed {
     fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
     /// Writes the fields in this set to the writer
     fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result;
-    /// Returns if all the fields in this set are initialized
-    fn is_initialized(&self) -> bool;
 }
 
 /// The result of trying to add a field to a field set
@@ -115,8 +111,10 @@ impl<V: Value> RepeatedValue<V> for RepeatedField<V::Inner> {
 
         Ok(())
     }
+}
+impl<V: Initializable> Initializable for RepeatedField<V> {
     fn is_initialized(&self) -> bool {
-        self.iter().all(V::is_initialized)
+        self.iter().all(is_initialized)
     }
 }
 impl<V: Value + Packable> RepeatedValue<Packed<V>> for RepeatedField<V::Inner> {
@@ -156,9 +154,6 @@ impl<V: Value + Packable> RepeatedValue<Packed<V>> for RepeatedField<V::Inner> {
             output.write_value::<V>(value)?;
         }
         Ok(())
-    }
-    fn is_initialized(&self) -> bool {
-        self.iter().all(V::is_initialized)
     }
 }
 impl<V: Clone> Mergable for RepeatedField<V> {
@@ -253,8 +248,10 @@ impl<K, V> RepeatedValue<(K, V)> for MapField<K::Inner, V::Inner>
 
         Ok(())
     }
+}
+impl<K, V: Initializable> Initializable for MapField<K, V> {
     fn is_initialized(&self) -> bool {
-        self.values().all(V::is_initialized)
+        self.values().all(is_initialized)
     }
 }
 

@@ -430,7 +430,7 @@ impl Length {
     /// assert_eq!(Length::of_values::<_, raw::Packed<raw::Sint32>>(&values, field), Length::new(5));
     /// ```
     pub fn of_values<T: RepeatedValue<V>, V>(value: &T, num: FieldNumber) -> Option<Length> {
-        LengthBuilder::new().add_values::<T, V>(value, num).map(LengthBuilder::build)
+        LengthBuilder::new().add_values::<T, V>(num, value).map(LengthBuilder::build)
     }
 
     /// Returns the length of the field set.
@@ -520,11 +520,20 @@ impl LengthBuilder {
             Some(temp)
         }
     }
+    /// Adds a field's length to this instance if it exists, otherwise returns the builder to continue chaining
+    #[inline]
+    #[must_use = "this returns the builder to chain and does not mutate it in place"]
+    pub fn add_optional_field<V: Value>(self, num: FieldNumber, value: Option<&V::Inner>) -> Option<Self> {
+        match value {
+            Some(v) => self.add_field::<V>(num, v),
+            None => Some(self)
+        }
+    }
 
     /// Adds a value collection's length to this instance with the specified tag
     #[inline]
     #[must_use = "this returns the builder to chain and does not mutate it in place"]
-    pub fn add_values<T: RepeatedValue<V>, V>(self, value: &T, num: FieldNumber) -> Option<Self> {
+    pub fn add_values<T: RepeatedValue<V>, V>(self, num: FieldNumber, value: &T) -> Option<Self> {
         value.calculate_size(self, num)
     }
 

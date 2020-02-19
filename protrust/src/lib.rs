@@ -71,7 +71,7 @@ pub use collections::unknown_fields::UnknownFieldSet;
 /// 
 /// assert_eq!(output, [8, 5]);
 /// ```
-pub trait Message: Default + Clone + PartialEq + Debug + Sized {
+pub trait Message: Initializable + Default + Clone + PartialEq + Debug + Sized {
     /// Merges this message with data from the [`CodedReader`](io/read/struct.CodedReader.html).
     /// 
     /// # Examples
@@ -132,8 +132,6 @@ pub trait Message: Default + Clone + PartialEq + Debug + Sized {
     /// timestamp.write_to(&mut writer).expect("size is calculated ahead of time");
     /// ```
     fn write_to<T: Output>(&self, output: &mut CodedWriter<T>) -> write::Result;
-    /// Returns whether the message value is initialized.
-    fn is_initialized(&self) -> bool;
 
     /// Gets a shared reference to the unknown fields in this message.
     /// 
@@ -337,4 +335,18 @@ pub trait Mergable<T = Self>: Sized {
 /// ```
 pub fn merge<T: Mergable<V>, V>(value: &mut T, other: &V) {
     value.merge(other)
+}
+
+pub trait Initializable {
+    fn is_initialized(&self) -> bool;
+}
+
+impl<T> Initializable for T {
+    default fn is_initialized(&self) -> bool {
+        true
+    }
+}
+
+pub fn is_initialized<T: ?Sized + Initializable>(t: &T) -> bool {
+    t.is_initialized()
 }

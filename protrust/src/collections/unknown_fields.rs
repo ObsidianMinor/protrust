@@ -122,7 +122,6 @@ impl FieldSet for UnknownFieldSet {
         }
         Ok(())
     }
-    fn is_initialized(&self) -> bool { true }
 }
 impl UnknownFieldSet {
     fn add_field_from<T: Input>(&mut self, input: &mut CodedReader<T>) -> read::Result<()> {

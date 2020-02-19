@@ -736,7 +736,7 @@ impl<T: Output> CodedWriter<T> {
     }
     /// Writes the values in the repeated field to the output. This uses an alias to `RepeatedValue::write_to`.
     #[inline]
-    pub fn write_values<U: RepeatedValue<V>, V>(&mut self, value: &U, num: FieldNumber) -> Result {
+    pub fn write_values<U: RepeatedValue<V>, V>(&mut self, num: FieldNumber, value: &U) -> Result {
         value.write_to(self, num)
     }
     /// Writes the fields in the set to the output. This uses an alias to `FieldSet::write_to`.

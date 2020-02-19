@@ -1,6 +1,6 @@
 //! Types and traits for working with proto2 extensions
 
-use crate::Mergable;
+use crate::{Initializable, Mergable};
 use crate::collections::{RepeatedField, FieldSet, TryRead};
 use crate::internal::Sealed;
 use crate::io::{read::{self, Input}, write::{self, Output}, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
@@ -8,13 +8,14 @@ use crate::raw::{ValueType, Value, Packable, Packed};
 use std::any::TypeId;
 use std::borrow::{Borrow, Cow, ToOwned};
 use std::collections::{HashMap, hash_map};
-use std::fmt::{self, Debug};
+use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
-use std::mem;
+use std::mem::{self, MaybeUninit};
+use std::sync::Once;
 
 mod internal {
-    use crate::{Mergable, merge};
-    use crate::collections::{RepeatedField, RepeatedValue};
+    use crate::{Initializable, is_initialized, Mergable, merge};
+    use crate::collections::RepeatedField;
     use crate::io::{read, write, FieldNumber, WireType, Tag, LengthBuilder, CodedReader, CodedWriter};
     use crate::raw::{ValueType, Value, Packable, Packed};
     use std::any::{Any, TypeId};
@@ -42,7 +43,7 @@ mod internal {
         fn entry_value(entry: Self::Entry) -> Self::Value;
     }
 
-    pub trait AnyExtension: Any + Debug + Send + Sync {
+    pub trait AnyExtension: Any + Initializable + Debug + Send + Sync {
         fn clone_into_box(&self) -> Box<dyn AnyExtension>;
         fn merge(&mut self, other: &dyn AnyExtension);
         fn eq(&self, other: &dyn AnyExtension) -> bool;
@@ -51,7 +52,6 @@ mod internal {
         fn try_merge_from(&mut self, input: &mut CodedReader<read::Any>) -> read::Result<TryReadValue<()>>;
         fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder>;
         fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result;
-        fn is_initialized(&self) -> bool;
     }
 
     pub struct ExtensionValue<V: ValueType> {
@@ -111,8 +111,15 @@ mod internal {
         fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result {
             output.write_field::<V>(self.num, &self.value)
         }
+    }
+
+    impl<V> Initializable for ExtensionValue<V>
+        where
+            V: ValueType,
+            V::Inner: Initializable
+    {
         fn is_initialized(&self) -> bool {
-            V::is_initialized(&self.value)
+            self.value.is_initialized()
         }
     }
 
@@ -183,13 +190,10 @@ mod internal {
             }
         }
         fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-            builder.add_values::<_, V>(&self.value, self.num)
+            builder.add_values::<_, V>(self.num, &self.value)
         }
         fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result {
-            output.write_values::<_, V>(&self.value, self.num)
-        }
-        fn is_initialized(&self) -> bool {
-            RepeatedValue::<V>::is_initialized(&self.value)
+            output.write_values::<_, V>(self.num, &self.value)
         }
     }
 
@@ -233,13 +237,16 @@ mod internal {
             }
         }
         fn calculate_size(&self, builder: LengthBuilder) -> Option<LengthBuilder> {
-            builder.add_values::<_, Packed<V>>(&self.value, self.num)
+            builder.add_values::<_, Packed<V>>(self.num, &self.value)
         }
         fn write_to(&self, output: &mut CodedWriter<write::Any>) -> write::Result {
-            output.write_values::<_, Packed<V>>(&self.value, self.num)
+            output.write_values::<_, Packed<V>>(self.num, &self.value)
         }
+    }
+
+    impl<V: ValueType> Initializable for RepeatedExtensionValue<V> {
         fn is_initialized(&self) -> bool {
-            RepeatedValue::<Packed<V>>::is_initialized(&self.value)
+            is_initialized(&self.value)
         }
     }
 
@@ -661,6 +668,8 @@ impl<T: ExtendableMessage + 'static> FieldSet for ExtensionSet<T> {
         }
         Ok(())
     }
+}
+impl<T: ExtendableMessage + 'static> Initializable for ExtensionSet<T> {
     fn is_initialized(&self) -> bool {
         for field in self.by_num.values() {
             if !field.is_initialized() {
@@ -669,6 +678,42 @@ impl<T: ExtendableMessage + 'static> FieldSet for ExtensionSet<T> {
         }
 
         true
+    }
+}
+impl<T: ExtendableMessage + 'static> Clone for ExtensionSet<T> {
+    fn clone(&self) -> Self {
+        Self {
+            t: PhantomData,
+            registry: self.registry,
+            by_num: self.by_num.iter().map(|(&f, v)| (f, v.clone_into_box())).collect()
+        }
+    }
+}
+impl<T: ExtendableMessage + 'static> PartialEq for ExtensionSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        if !self.has_registry(other.registry) {
+            return false;
+        }
+
+        for (f, v) in &self.by_num {
+            match other.by_num.get(f) {
+                Some(o) => {
+                    if !v.eq(o.as_ref()) {
+                        return false;
+                    }
+                },
+                None => return false,
+            }
+        }
+
+        true
+    }
+}
+impl<T: ExtendableMessage + 'static> Debug for ExtensionSet<T> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_map()
+            .entries(&self.by_num)
+            .finish()
     }
 }
 

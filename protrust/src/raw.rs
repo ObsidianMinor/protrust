@@ -27,9 +27,6 @@ pub trait Value: ValueType {
     /// Writes the value to the [`CodedWriter`](../io/write/struct.CodedWriter.html)
     fn write_to<T: Output>(this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result;
 
-    /// Returns whether the value is initialized, that is, if all the required fields in the value are set.
-    fn is_initialized(this: &Self::Inner) -> bool;
-
     /// Reads a new instance of the value
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner>;
 }
@@ -87,7 +84,6 @@ impl Value for Int32 {
             output.write_varint64(i64::from(this) as u64)
         }
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_varint32().map(|v| v as i32)
     }
@@ -111,7 +107,6 @@ impl Value for Uint32 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint32(this)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_varint32()
     }
@@ -135,7 +130,6 @@ impl Value for Int64 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint64(this as u64)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_varint64().map(|v| v as i64)
     }
@@ -159,7 +153,6 @@ impl Value for Uint64 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint64(this)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_varint64()
     }
@@ -184,7 +177,6 @@ impl Value for Sint32 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint32(((this << 1) ^ (this >> 31)) as u32)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_varint32().map(|v| ((v >> 1) ^ (v << 31)) as i32)
     }
@@ -209,7 +201,6 @@ impl Value for Sint64 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint64(((this << 1) ^ (this >> 63)) as u64)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_varint64().map(|v| ((v >> 1) ^ (v << 63)) as i64)
     }
@@ -233,7 +224,6 @@ impl Value for Fixed32 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_bit32(this)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_bit32()
     }
@@ -260,7 +250,6 @@ impl Value for Fixed64 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_bit64(this)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_bit64()
     }
@@ -287,7 +276,6 @@ impl Value for Sfixed32 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_bit32(this as u32)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_bit32().map(|v| v as i32)
     }
@@ -314,7 +302,6 @@ impl Value for Sfixed64 {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_bit64(this as u64)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_bit64().map(|v| v as i64)
     }
@@ -341,13 +328,64 @@ impl Value for Bool {
     fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_varint32(this as u32)
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         input.read_varint64().map(|v| v != 0)
     }
 }
 impl ConstSized for Bool {
     const SIZE: Length = unsafe { Length::new_unchecked(1) };
+}
+
+/// A float value. This is encoded as 4 little endian bytes
+pub struct Float;
+impl Sealed for Float { }
+impl ValueType for Float {
+    type Inner = f32;
+}
+impl Value for Float {
+    const WIRE_TYPE: WireType = WireType::Bit32;
+
+    fn calculate_size(_this: &Self::Inner, builder: LengthBuilder) -> Option<LengthBuilder> {
+        builder.add_bytes(Self::SIZE)
+    }
+    fn merge_from<T: Input>(this: &mut Self::Inner, input: &mut CodedReader<T>) -> read::Result<()> {
+        Self::read_new(input).map(|v| *this = v)
+    }
+    fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
+        output.write_bit32(f32::to_bits(this))
+    }
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
+        input.read_bit32().map(f32::from_bits)
+    }
+}
+impl ConstSized for Float {
+    const SIZE: Length = unsafe { Length::new_unchecked(4) };
+}
+
+/// A double value. This is encoded as 4 little endian bytes
+pub struct Double;
+impl Sealed for Double { }
+impl ValueType for Double {
+    type Inner = f64;
+}
+impl Value for Double {
+    const WIRE_TYPE: WireType = WireType::Bit64;
+
+    fn calculate_size(_this: &Self::Inner, builder: LengthBuilder) -> Option<LengthBuilder> {
+        builder.add_bytes(Self::SIZE)
+    }
+    fn merge_from<T: Input>(this: &mut Self::Inner, input: &mut CodedReader<T>) -> read::Result<()> {
+        Self::read_new(input).map(|v| *this = v)
+    }
+    fn write_to<T: Output>(&this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
+        output.write_bit64(f64::to_bits(this))
+    }
+    fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
+        input.read_bit64().map(f64::from_bits)
+    }
+}
+impl ConstSized for Double {
+    const SIZE: Length = unsafe { Length::new_unchecked(8) };
 }
 
 /// A string value. This is encoded as a length-delimited series of bytes.
@@ -371,7 +409,6 @@ impl Value for String {
     fn write_to<T: Output>(this: &Self::Inner, output: &mut CodedWriter<T>) -> write::Result {
         output.write_length_delimited(this.as_bytes())
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<T: Input>(input: &mut CodedReader<T>) -> read::Result<Self::Inner> {
         std::string::String::from_utf8(input.read_value::<Bytes<Vec<_>>>()?)
             .map_err(io::read::Error::InvalidString)
@@ -399,7 +436,6 @@ impl<T: ByteString> Value for Bytes<T> {
     fn write_to<U: Output>(this: &Self::Inner, output: &mut CodedWriter<U>) -> write::Result {
         output.write_length_delimited(this.as_ref())
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
         input.read_length_delimited::<T>()
     }
@@ -423,7 +459,6 @@ impl<T: crate::Enum> Value for Enum<T> {
     fn write_to<U: Output>(&this: &Self::Inner, output: &mut CodedWriter<U>) -> write::Result {
         output.write_value::<Int32>(&this.into())
     }
-    fn is_initialized(_this: &Self::Inner) -> bool { true }
     fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
         Int32::read_new(input).map(|v| v.into())
     }
@@ -452,9 +487,6 @@ impl<T: TraitMessage> Value for Message<T> {
         output.write_length(length)?;
         TraitMessage::write_to::<U>(this, output)?;
         Ok(())
-    }
-    fn is_initialized(this: &Self::Inner) -> bool {
-        this.is_initialized()
     }
     default fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
         input.recurse(|input| {
@@ -490,9 +522,6 @@ impl<T: TraitMessage> Value for Group<T> {
     }
     fn write_to<U: Output>(this: &Self::Inner, output: &mut CodedWriter<U>) -> write::Result {
         this.write_to(output)
-    }
-    fn is_initialized(this: &Self::Inner) -> bool {
-        this.is_initialized()
     }
     fn read_new<U: Input>(input: &mut CodedReader<U>) -> read::Result<Self::Inner> {
         let mut t = T::default();
