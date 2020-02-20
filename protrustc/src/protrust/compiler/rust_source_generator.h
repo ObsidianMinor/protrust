@@ -6,8 +6,6 @@
 namespace protrust {
 namespace compiler {
 
-struct Options;
-
 class RustSourceGenerator {
 protected:
     RustSourceGenerator(const Options& options);

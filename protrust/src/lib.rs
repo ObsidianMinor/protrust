@@ -16,9 +16,61 @@
 #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
 compile_error!("This library does not support 16-bit platforms");
 
+#[doc(hidden)]
+pub extern crate self as protrust;
+
 mod internal {
     pub trait Sealed { }
 }
+
+#[doc(hidden)]
+pub mod gen_prelude {
+    pub use u8;
+    pub use i32;
+    pub use u32;
+    pub use i64;
+    pub use u64;
+    pub use f32;
+    pub use f64;
+    pub use bool;
+    pub use str;
+
+    pub use ::protrust as p;
+    pub use ::protrust::collections as pc;
+    pub use ::protrust::extend as pe;
+    pub use ::protrust::io as pio;
+    pub use ::protrust::raw as pr;
+    pub use ::protrust::reflect as prefl;
+
+    pub use ::std::boxed::Box;
+    pub use ::std::convert::{From, AsRef};
+    pub use ::std::default::Default;
+    pub use ::std::fmt::{self, Formatter, Debug};
+    pub use ::std::option::Option;
+    pub use ::std::option::Option::Some;
+    pub use ::std::option::Option::None;
+    pub use ::std::result::Result::Ok;
+    pub use ::std::string::String;
+    pub use ::std::vec::Vec;
+
+    pub type ByteVec = ::std::vec::Vec<u8>;
+
+    pub use ::protrust::{Message, Initializable, Enum, UnknownFieldSet};
+    pub use ::protrust::collections::{RepeatedField, MapField};
+    pub use ::protrust::extend::{ExtensionSet, ExtendableMessage, Extension, RepeatedExtension};
+    pub use ::protrust::io::{Length, FieldNumber, Input, Output, CodedReader, CodedWriter, read, write};
+}
+
+#[doc(hidden)]
+pub mod export {
+    pub use protrust_macros as macros;
+}
+
+#[doc(hidden)]
+pub mod gen;
+
+/// The descriptor proto included with the library
+pub use gen::google_protobuf_descriptor_proto as descriptor;
 
 #[cfg(doctest)]
 pub mod doctest;
@@ -27,6 +79,7 @@ pub mod collections;
 pub mod extend;
 pub mod io;
 pub mod raw;
+pub mod reflect;
 
 use crate::io::{read, write, Length, CodedReader, CodedWriter, Input, Output};
 use std::fmt::Debug;

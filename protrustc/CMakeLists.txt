@@ -9,8 +9,9 @@ set(files
     src/protrust/compiler/rust_generator.h
     src/protrust/compiler/rust_generator.cpp
     src/protrust/compiler/rust_helpers.h
-    src/protrust/compiler/rust_options.h
     src/protrust/compiler/rust_names.h
+    src/protrust/compiler/rust_helpers.cpp
+    src/protrust/compiler/rust_options.h
     src/protrust/compiler/rust_source_generator.h
     src/protrust/compiler/rust_source_generator.cpp
     src/protrust/compiler/rust_mod_generator.h
@@ -21,10 +22,18 @@ set(files
     src/protrust/compiler/rust_file_generator.cpp
     src/protrust/compiler/rust_message_generator.h
     src/protrust/compiler/rust_message_generator.cpp
-    src/protrust/compiler/rust_field_generator.h
-    src/protrust/compiler/rust_field_generator.cpp
     src/protrust/compiler/rust_enum_generator.h
     src/protrust/compiler/rust_enum_generator.cpp
+    src/protrust/compiler/rust_field_generator.h
+    src/protrust/compiler/rust_field_generator.cpp
+    src/protrust/compiler/rust_repeated_field_generator.h
+    src/protrust/compiler/rust_repeated_field_generator.cpp
+    src/protrust/compiler/rust_map_field_generator.h
+    src/protrust/compiler/rust_map_field_generator.cpp
+    src/protrust/compiler/rust_message_field_generator.h
+    src/protrust/compiler/rust_message_field_generator.cpp
+    src/protrust/compiler/rust_primitive_field_generator.h
+    src/protrust/compiler/rust_primitive_field_generator.cpp
 )
 
 add_executable (protoc-gen-rust ${files})

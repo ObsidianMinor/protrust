@@ -7,3 +7,8 @@ edition = "2018"
 [features]
 # use checked addition when calculating value sizes
 checked_size = []
+# use reflection
+reflect = []
+
+[dependencies]
+protrust_macros = { path = "../protrust_macros", version = "0.0.0" }

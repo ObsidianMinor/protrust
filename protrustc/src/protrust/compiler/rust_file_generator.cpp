@@ -3,6 +3,8 @@
 #include <protrust/compiler/rust_enum_generator.h>
 #include <protrust/compiler/rust_field_generator.h>
 
+#include <memory>
+
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/io/printer.h>
 
@@ -19,7 +21,13 @@ RustFileGenerator::~RustFileGenerator() { }
 void RustFileGenerator::Generate(io::Printer& printer) {
     const FileDescriptor* file = this->_file;
 
-    printer.Print("prefl::file!(file: __globals::pool => \"$name$\");\n\n", "name", file->name());
+    // printer.Print("prefl::file!(file: __globals::pool => \"$name$\");\n\n", "name", file->name());
+
+    printer.Print(
+        "pub(self) use super::__file;\n"
+        "pub(self) use ::protrust::gen_prelude as __prelude;\n"
+        "\n"
+    );
 
     for (int i = 0; i < file->message_type_count(); i++) {
         const Descriptor* message_type = file->message_type(i);
@@ -35,8 +43,8 @@ void RustFileGenerator::Generate(io::Printer& printer) {
 
     for (int i = 0; i < file->extension_count(); i++) {
         const FieldDescriptor* field = file->extension(i);
-        RustFieldGenerator generator(field, this->options());
-        generator.GenerateExtension(printer);
+        std::unique_ptr<RustFieldGenerator> generator = CreateFieldGenerator(field, this->options());
+        generator->GenerateExtension(printer);
     }
 }
 
